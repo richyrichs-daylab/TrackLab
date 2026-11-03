@@ -5,8 +5,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import com.example.audiomix.data.ProjectRepository
@@ -49,10 +49,7 @@ fun AudioMixApp(repo: ProjectRepository, settings: SettingsStore) {
 
             "project" -> ProjectScreen(
                 project = openProject!!,
-                onRename = { newName ->
-                    repo.rename(openProject.id, newName)
-                    reload()
-                },
+                onSave = { repo.save(it) },
                 onClose = {
                     reload()
                     screen = "start"
