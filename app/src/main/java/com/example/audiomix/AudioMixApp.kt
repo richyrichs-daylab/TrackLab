@@ -6,19 +6,25 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import com.example.audiomix.data.Exporter
 import com.example.audiomix.data.ProjectRepository
 import com.example.audiomix.data.SettingsStore
 import com.example.audiomix.ui.AudioMixTheme
 import com.example.audiomix.ui.ProjectScreen
 import com.example.audiomix.ui.SettingsScreen
 import com.example.audiomix.ui.StartScreen
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun AudioMixApp(repo: ProjectRepository, settings: SettingsStore) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     var darkMode by remember { mutableStateOf(settings.darkMode) }
     var screen by rememberSaveable { mutableStateOf("start") }
@@ -76,8 +82,22 @@ fun AudioMixApp(repo: ProjectRepository, settings: SettingsStore) {
                     repo.delete(id)
                     reload()
                 },
-                onExport = {
-                    Toast.makeText(context, "Noch kein Audio vorhanden", Toast.LENGTH_SHORT).show()
+                onExport = { id ->
+                    val project = repo.get(id)
+                    if (project == null || project.tracks.all { it.clips.isEmpty() }) {
+                        Toast.makeText(context, "Noch kein Audio vorhanden", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "Export läuft …", Toast.LENGTH_SHORT).show()
+                        scope.launch {
+                            val name = withContext(Dispatchers.IO) { Exporter.export(context, project) }
+                            val message = if (name != null) {
+                                "Gespeichert in Downloads: $name"
+                            } else {
+                                "Export fehlgeschlagen"
+                            }
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        }
+                    }
                 },
                 onOpenSettings = { screen = "settings" }
             )
