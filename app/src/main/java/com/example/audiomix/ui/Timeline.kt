@@ -2,6 +2,8 @@ package com.example.audiomix.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -21,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,7 +34,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
@@ -40,6 +46,8 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.audiomix.data.AudioImport
+import com.example.audiomix.data.Clip
 import com.example.audiomix.data.ProjectEditor
 import com.example.audiomix.data.Track
 import com.example.audiomix.data.TrackType
@@ -56,10 +64,23 @@ const val MIN_LINE_DP = 16
 const val MIN_BAR_DP = 24
 const val MAX_BAR_DP = 600
 
-/** Zoom (Pixel pro Takt) und seitliche Verschiebung der Zeitleiste. */
+private const val MODE_TRIM_START = 0
+private const val MODE_TRIM_END = 1
+private const val MODE_MOVE = 2
+
+private class DragTarget(
+    val mode: Int,
+    val trackId: String,
+    val type: TrackType,
+    val clip: Clip
+)
+
+/** Zoom (Pixel pro Takt), seitliche Verschiebung und der Clip, der gerade gezogen wird. */
 class TimelineState(initialBarPx: Float) {
     var barPx by mutableFloatStateOf(initialBarPx)
     var scrollPx by mutableFloatStateOf(0f)
+    var ghostTrackId by mutableStateOf<String?>(null)
+    var ghostClip by mutableStateOf<Clip?>(null)
 
     /** Wie fein das sichtbare Raster gerade ist: 1, 2, 4, 8 oder 16 Striche pro Takt. */
     fun division(density: Density): Int {
@@ -74,8 +95,50 @@ class TimelineState(initialBarPx: Float) {
 fun snapBar(bar: Double, division: Int): Double =
     (round(bar * division) / division).coerceAtLeast(0.0)
 
+/** Berechnet, wie der Clip während des Ziehens aussieht. */
+private fun computeGhost(t: DragTarget, deltaBars: Double, div: Int): Clip {
+    val c = t.clip
+    val minLen = 1.0 / 16.0
+    return when (t.mode) {
+        MODE_MOVE -> c.copy(startBar = snapBar(c.startBar + deltaBars, div))
+
+        MODE_TRIM_START -> {
+            val edge = snapBar(c.startBar + deltaBars, div)
+            var delta = edge - c.startBar
+            var lo = -c.startBar
+            if (t.type == TrackType.AUDIO) lo = maxOf(lo, -c.offsetBar)
+            val hi = c.lengthBar - minLen
+            delta = minOf(maxOf(delta, lo), hi)
+            c.copy(
+                startBar = c.startBar + delta,
+                lengthBar = c.lengthBar - delta,
+                offsetBar = if (t.type == TrackType.AUDIO) c.offsetBar + delta else c.offsetBar
+            )
+        }
+
+        MODE_TRIM_END -> {
+            val edge = snapBar(c.endBar + deltaBars, div)
+            var len = edge - c.startBar
+            val maxLen = if (t.type == TrackType.AUDIO && c.sourceLengthBar > 0.0) {
+                c.sourceLengthBar - c.offsetBar
+            } else {
+                Double.MAX_VALUE
+            }
+            len = minOf(maxOf(len, minLen), maxLen)
+            c.copy(lengthBar = len)
+        }
+
+        else -> c
+    }
+}
+
 @Composable
-fun Timeline(editor: ProjectEditor, state: TimelineState, modifier: Modifier = Modifier) {
+fun Timeline(
+    editor: ProjectEditor,
+    state: TimelineState,
+    peaks: Map<String, ByteArray>,
+    modifier: Modifier = Modifier
+) {
     val colors = LocalAppColors.current
     val density = LocalDensity.current
     val textMeasurer = rememberTextMeasurer()
@@ -106,6 +169,32 @@ fun Timeline(editor: ProjectEditor, state: TimelineState, modifier: Modifier = M
         }
     }
 
+    /** Was liegt unter dem Finger: ein Griff des ausgewählten Clips oder ein Clip zum Verschieben? */
+    fun findTarget(p: Offset, rowsTop: Float, rowH: Float, grab: Float): DragTarget? {
+        if (p.y < rowsTop) return null
+        val index = ((p.y - rowsTop) / rowH).toInt()
+        val track = editor.tracks.getOrNull(index) ?: return null
+        val barPx = state.barPx
+        val scroll = state.scrollPx
+
+        if (track.id == editor.selectedTrackId) {
+            val selected = track.clips.firstOrNull { it.id == editor.selectedClipId }
+            if (selected != null) {
+                val left = (selected.startBar * barPx - scroll).toFloat()
+                val right = (selected.endBar * barPx - scroll).toFloat()
+                if (abs(p.x - left) <= grab) {
+                    return DragTarget(MODE_TRIM_START, track.id, track.type, selected)
+                }
+                if (abs(p.x - right) <= grab) {
+                    return DragTarget(MODE_TRIM_END, track.id, track.type, selected)
+                }
+            }
+        }
+        val bar = ((p.x + scroll) / barPx).toDouble()
+        val clip = track.clips.firstOrNull { bar >= it.startBar && bar < it.endBar } ?: return null
+        return DragTarget(MODE_MOVE, track.id, track.type, clip)
+    }
+
     Row(modifier = modifier.fillMaxWidth().background(colors.timelineBg)) {
 
         // Kreise am Zeilenanfang (immer sichtbar)
@@ -125,6 +214,64 @@ fun Timeline(editor: ProjectEditor, state: TimelineState, modifier: Modifier = M
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
+                    // 1) Griffe ziehen und Clips verschieben (greift zuerst ein)
+                    .pointerInput(Unit) {
+                        val rowsTop = (HANDLE_DP + RULER_DP).dp.toPx()
+                        val rowH = ROW_DP.dp.toPx()
+                        val grab = 24.dp.toPx()
+                        awaitEachGesture {
+                            val down = awaitFirstDown(
+                                requireUnconsumed = false,
+                                pass = PointerEventPass.Initial
+                            )
+                            val target = findTarget(down.position, rowsTop, rowH, grab)
+                                ?: return@awaitEachGesture
+
+                            if (target.mode == MODE_MOVE) {
+                                // Erst gedrückt halten, dann verschieben
+                                val slop = viewConfiguration.touchSlop
+                                val cancelled = withTimeoutOrNull<Boolean>(
+                                    viewConfiguration.longPressTimeoutMillis
+                                ) {
+                                    while (true) {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        val change = event.changes.firstOrNull { it.id == down.id }
+                                        if (change == null || change.changedToUpIgnoreConsumed()) {
+                                            return@withTimeoutOrNull true
+                                        }
+                                        if ((change.position - down.position).getDistance() > slop) {
+                                            return@withTimeoutOrNull true
+                                        }
+                                    }
+                                    false
+                                }
+                                if (cancelled != null) return@awaitEachGesture
+                                editor.selectTrack(target.trackId)
+                                editor.selectClip(target.clip.id)
+                            } else {
+                                down.consume()
+                            }
+
+                            val startX = down.position.x
+                            state.ghostTrackId = target.trackId
+                            state.ghostClip = target.clip
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                change.consume()
+                                if (change.changedToUpIgnoreConsumed()) break
+                                val deltaBars = ((change.position.x - startX) / state.barPx).toDouble()
+                                state.ghostClip = computeGhost(target, deltaBars, state.division(this))
+                            }
+                            val ghost = state.ghostClip
+                            state.ghostClip = null
+                            state.ghostTrackId = null
+                            if (ghost != null && ghost != target.clip) {
+                                editor.replaceClip(target.trackId, ghost)
+                            }
+                        }
+                    }
+                    // 2) Antippen
                     .pointerInput(Unit) {
                         val rowsTop = (HANDLE_DP + RULER_DP).dp.toPx()
                         val rowH = ROW_DP.dp.toPx()
@@ -133,6 +280,7 @@ fun Timeline(editor: ProjectEditor, state: TimelineState, modifier: Modifier = M
                             onLongPress = { off -> regionTap(off, rowsTop, rowH, true) }
                         )
                     }
+                    // 3) Scrollen und Zoomen
                     .pointerInput(Unit) {
                         val minBar = MIN_BAR_DP.dp.toPx()
                         val maxBar = MAX_BAR_DP.dp.toPx()
@@ -158,6 +306,8 @@ fun Timeline(editor: ProjectEditor, state: TimelineState, modifier: Modifier = M
                 val step = barPx / div
                 val currentTracks = editor.tracks
                 val rowsBottom = rowsTop + currentTracks.size * rowH
+                val ghost = state.ghostClip
+                val secondsPerBar = 240.0 / editor.project.bpm
 
                 // Hintergründe
                 drawRect(colors.ruler, Offset(0f, handleH), Size(w, rulerH))
@@ -215,31 +365,78 @@ fun Timeline(editor: ProjectEditor, state: TimelineState, modifier: Modifier = M
                 // Clips
                 currentTracks.forEachIndexed { r, t ->
                     val y = rowsTop + r * rowH
-                    t.clips.forEach { c ->
+                    t.clips.forEach { original ->
+                        val c = if (ghost != null && ghost.id == original.id) ghost else original
                         val left = (c.startBar * barPx - scroll).toFloat()
                         val width = (c.lengthBar * barPx).toFloat()
                         if (left + width < 0f || left > w) return@forEach
+
                         val base = if (t.type == TrackType.AUDIO) Color(0xFFE8C14B) else Color(0xFFF5A04A)
                         val color = if (c.id == editor.selectedClipId) lerp(base, Color.Gray, 0.4f) else base
+                        val top = y + 6.dp.toPx()
+                        val clipH = rowH - 12.dp.toPx()
                         drawRoundRect(
                             color,
-                            Offset(left, y + 6.dp.toPx()),
-                            Size(width, rowH - 12.dp.toPx()),
+                            Offset(left, top),
+                            Size(width, clipH),
                             CornerRadius(12.dp.toPx())
                         )
-                        if (t.type == TrackType.DRUM && barPx / 4f >= 8.dp.toPx()) {
-                            var beat = ceil(c.startBar * 4.0 - 1e-9) / 4.0
-                            while (beat < c.endBar - 1e-9) {
-                                val hx = (beat * barPx - scroll).toFloat()
-                                drawRoundRect(
-                                    Color(0xFF7A4A1E),
-                                    Offset(hx - 2.dp.toPx(), y + 24.dp.toPx()),
-                                    Size(4.dp.toPx(), rowH - 48.dp.toPx()),
-                                    CornerRadius(2.dp.toPx())
-                                )
-                                beat += 0.25
+
+                        if (t.type == TrackType.DRUM) {
+                            if (barPx / 4f >= 8.dp.toPx()) {
+                                var beat = ceil(c.startBar * 4.0 - 1e-9) / 4.0
+                                while (beat < c.endBar - 1e-9) {
+                                    val hx = (beat * barPx - scroll).toFloat()
+                                    drawRoundRect(
+                                        Color(0xFF7A4A1E),
+                                        Offset(hx - 2.dp.toPx(), y + 24.dp.toPx()),
+                                        Size(4.dp.toPx(), rowH - 48.dp.toPx()),
+                                        CornerRadius(2.dp.toPx())
+                                    )
+                                    beat += 0.25
+                                }
+                            }
+                        } else {
+                            val data = c.sourceFile?.let { peaks[it] }
+                            if (data != null && data.isNotEmpty()) {
+                                val cy = top + clipH / 2f
+                                val x0 = maxOf(left, 0f)
+                                val x1 = minOf(left + width, w)
+                                val stepPx = 3.dp.toPx()
+                                var x = x0
+                                while (x < x1) {
+                                    val barInClip = (x - left) / barPx
+                                    val sec = (c.offsetBar + barInClip) * secondsPerBar
+                                    val idx = (sec * AudioImport.PEAKS_PER_SECOND).toInt()
+                                    if (idx >= 0 && idx < data.size) {
+                                        val amp = (data[idx].toInt() and 0xFF) / 255f
+                                        val half = maxOf(1.5.dp.toPx(), amp * clipH / 2f * 0.9f)
+                                        drawLine(
+                                            Color(0xFF7A5C10),
+                                            Offset(x, cy - half),
+                                            Offset(x, cy + half),
+                                            2.dp.toPx()
+                                        )
+                                    }
+                                    x += stepPx
+                                }
                             }
                         }
+                    }
+                }
+
+                // Halbkreis-Griffe am ausgewählten Clip
+                val selIndex = currentTracks.indexOfFirst { it.id == editor.selectedTrackId }
+                if (selIndex >= 0 && editor.selectedClipId != null) {
+                    val original = currentTracks[selIndex].clips
+                        .firstOrNull { it.id == editor.selectedClipId }
+                    if (original != null) {
+                        val sc = if (ghost != null && ghost.id == original.id) ghost else original
+                        val cy = rowsTop + selIndex * rowH + rowH / 2f
+                        val l = (sc.startBar * barPx - scroll).toFloat()
+                        val r = (sc.endBar * barPx - scroll).toFloat()
+                        drawHandle(l, cy, 14.dp.toPx(), true)
+                        drawHandle(r, cy, 14.dp.toPx(), false)
                     }
                 }
 
@@ -256,7 +453,6 @@ fun Timeline(editor: ProjectEditor, state: TimelineState, modifier: Modifier = M
                         startY = 0f,
                         endY = h
                     )
-                    // Linie
                     drawRoundRect(
                         Color.Black,
                         Offset(cx - 4.dp.toPx(), handleH),
@@ -269,7 +465,6 @@ fun Timeline(editor: ProjectEditor, state: TimelineState, modifier: Modifier = M
                         Size(3.5.dp.toPx(), h - handleH),
                         CornerRadius(2.dp.toPx())
                     )
-                    // Griff (dickere Stelle oben)
                     drawRoundRect(
                         Color.Black,
                         Offset(cx - 11.dp.toPx(), 0f),
@@ -325,6 +520,27 @@ fun Timeline(editor: ProjectEditor, state: TimelineState, modifier: Modifier = M
             )
         }
     }
+}
+
+private fun DrawScope.drawHandle(cx: Float, cy: Float, radius: Float, leftSide: Boolean) {
+    val startAngle = if (leftSide) 90f else 270f
+    drawArc(
+        Color.Black,
+        startAngle,
+        180f,
+        true,
+        Offset(cx - radius, cy - radius),
+        Size(radius * 2f, radius * 2f)
+    )
+    val inner = radius - 3.dp.toPx()
+    drawArc(
+        Color(0xFFE8607A),
+        startAngle,
+        180f,
+        true,
+        Offset(cx - inner, cy - inner),
+        Size(inner * 2f, inner * 2f)
+    )
 }
 
 @Composable
