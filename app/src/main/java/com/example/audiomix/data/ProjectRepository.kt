@@ -6,7 +6,8 @@ import java.util.UUID
 
 class ProjectRepository(context: Context) {
 
-    private val dir = File(context.filesDir, "projects").apply { mkdirs() }
+    private val root = context.filesDir
+    private val dir = File(root, "projects").apply { mkdirs() }
 
     fun loadAll(): List<Project> =
         dir.listFiles { f -> f.extension == "json" }
@@ -26,6 +27,7 @@ class ProjectRepository(context: Context) {
 
     fun delete(id: String) {
         File(dir, "$id.json").delete()
+        File(root, "audio/$id").deleteRecursively()
     }
 
     /** Legt "Projekt 1", "Projekt 2" ... an; bereits benutzte Nummern werden übersprungen. */
