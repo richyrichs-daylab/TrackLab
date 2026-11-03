@@ -65,6 +65,18 @@ class ProjectEditor(
         insertClip(TrackType.DRUM, clip)
     }
 
+    fun addAudioClip(fileName: String, lengthBar: Double, startBar: Double) {
+        val clip = Clip(
+            id = UUID.randomUUID().toString(),
+            startBar = startBar,
+            lengthBar = lengthBar,
+            offsetBar = 0.0,
+            sourceFile = fileName,
+            sourceLengthBar = lengthBar
+        )
+        insertClip(TrackType.AUDIO, clip)
+    }
+
     /** Fügt einen Clip in die ausgewählte Zeile (gleiche Audioart) oder in eine neue Zeile ein. */
     fun insertClip(type: TrackType, clip: Clip) {
         val selected = tracks.firstOrNull { it.id == selectedTrackId }
@@ -74,6 +86,19 @@ class ProjectEditor(
             }
         } else {
             tracks + Track(UUID.randomUUID().toString(), type, listOf(clip))
+        }
+        commitTracks(newTracks)
+    }
+
+    /** Ersetzt einen vorhandenen Clip (gekürzt, verlängert oder verschoben). */
+    fun replaceClip(trackId: String, newClip: Clip) {
+        val newTracks = tracks.map { t ->
+            if (t.id == trackId) {
+                val others = t.clips.filter { it.id != newClip.id }
+                t.copy(clips = overwrite(others, newClip))
+            } else {
+                t
+            }
         }
         commitTracks(newTracks)
     }
