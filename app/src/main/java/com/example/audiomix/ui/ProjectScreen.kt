@@ -1,6 +1,9 @@
 package com.example.audiomix.ui
 
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -27,9 +30,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,8 +55,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.example.audiomix.data.AudioFiles
+import com.example.audiomix.data.AudioImport
 import com.example.audiomix.data.Project
 import com.example.audiomix.data.ProjectEditor
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -61,9 +73,11 @@ fun ProjectScreen(
     val colors = LocalAppColors.current
     val context = LocalContext.current
     val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
 
     val editor = remember(project.id) { ProjectEditor(project, onSave) }
     val timeline = remember { TimelineState(with(density) { 66.dp.toPx() }) }
+    val peaks = remember(project.id) { mutableStateMapOf<String, ByteArray>() }
 
     var editingName by remember { mutableStateOf(false) }
     var nameText by remember(editingName) {
@@ -77,6 +91,48 @@ fun ProjectScreen(
     var playing by remember { mutableStateOf(false) }
     var plusMenu by remember { mutableStateOf(false) }
     var showBpm by remember { mutableStateOf(false) }
+    var pendingBar by remember { mutableDoubleStateOf(0.0) }
+
+    // Dateien-App für den MP3-Import
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                Toast.makeText(context, "MP3 wird importiert …", Toast.LENGTH_SHORT).show()
+                val imported = withContext(Dispatchers.IO) {
+                    AudioImport.importMp3(context, uri, project.id)
+                }
+                if (imported == null) {
+                    Toast.makeText(
+                        context,
+                        "Diese Datei konnte nicht gelesen werden (nur MP3 möglich)",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    val secondsPerBar = 240.0 / editor.project.bpm
+                    editor.addAudioClip(
+                        fileName = imported.fileName,
+                        lengthBar = imported.durationSec / secondsPerBar,
+                        startBar = pendingBar
+                    )
+                }
+            }
+        }
+    }
+
+    // Wellenform-Daten der Audio-Clips laden
+    LaunchedEffect(editor.project.tracks) {
+        val needed = editor.tracks
+            .flatMap { it.clips }
+            .mapNotNull { it.sourceFile }
+            .distinct()
+            .filter { it !in peaks }
+        for (name in needed) {
+            val data = withContext(Dispatchers.IO) {
+                AudioFiles.loadPeaks(context, project.id, name)
+            }
+            if (data != null) peaks[name] = data
+        }
+    }
 
     // Abspielen: der Cursor läuft passend zur BPM-Zahl (Ton folgt in einem späteren Schritt)
     LaunchedEffect(playing) {
@@ -215,11 +271,8 @@ fun ProjectScreen(
                         text = { Text("Dateien") },
                         onClick = {
                             plusMenu = false
-                            Toast.makeText(
-                                context,
-                                "MP3-Import kommt im nächsten Schritt",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            pendingBar = editor.cursorBar
+                            picker.launch(arrayOf("audio/*"))
                         }
                     )
                     DropdownMenuItem(
@@ -234,7 +287,12 @@ fun ProjectScreen(
         }
 
         // ---- Zeitleiste ----
-        Timeline(editor = editor, state = timeline, modifier = Modifier.weight(1f))
+        Timeline(
+            editor = editor,
+            state = timeline,
+            peaks = peaks,
+            modifier = Modifier.weight(1f)
+        )
 
         // ---- Unterer Bereich: Mülleimer + Play/Pause ----
         Box(
