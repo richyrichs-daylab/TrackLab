@@ -28,9 +28,11 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,6 +59,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.example.audiomix.data.AudioFiles
 import com.example.audiomix.data.AudioImport
+import com.example.audiomix.data.Exporter
+import com.example.audiomix.data.MixPlayer
+import com.example.audiomix.data.MixRenderer
 import com.example.audiomix.data.Project
 import com.example.audiomix.data.ProjectEditor
 import kotlinx.coroutines.Dispatchers
@@ -78,6 +83,7 @@ fun ProjectScreen(
     val editor = remember(project.id) { ProjectEditor(project, onSave) }
     val timeline = remember { TimelineState(with(density) { 66.dp.toPx() }) }
     val peaks = remember(project.id) { mutableStateMapOf<String, ByteArray>() }
+    val player = remember { MixPlayer() }
 
     var editingName by remember { mutableStateOf(false) }
     var nameText by remember(editingName) {
@@ -89,9 +95,14 @@ fun ProjectScreen(
     LaunchedEffect(editingName) { if (editingName) focus.requestFocus() }
 
     var playing by remember { mutableStateOf(false) }
+    var restartKey by remember { mutableIntStateOf(0) }
     var plusMenu by remember { mutableStateOf(false) }
     var showBpm by remember { mutableStateOf(false) }
     var pendingBar by remember { mutableDoubleStateOf(0.0) }
+
+    DisposableEffect(Unit) {
+        onDispose { player.stop() }
+    }
 
     // Dateien-App für den MP3-Import
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -134,21 +145,42 @@ fun ProjectScreen(
         }
     }
 
-    // Abspielen: der Cursor läuft passend zur BPM-Zahl (Ton folgt in einem späteren Schritt)
-    LaunchedEffect(playing) {
+    // Abspielen: Ton läuft, der Cursor folgt dem Ton
+    LaunchedEffect(playing, restartKey) {
         if (playing) {
-            var last = withFrameNanos { it }
-            while (true) {
-                val now = withFrameNanos { it }
-                val secondsPerBar = 4 * 60.0 / editor.project.bpm
-                editor.cursorBar += (now - last) / 1_000_000_000.0 / secondsPerBar
-                last = now
-                val end = editor.endBar()
-                if (editor.cursorBar >= end) {
-                    editor.cursorBar = end
+            val renderer = MixRenderer(context, project.id, editor.tracks, editor.project.bpm)
+            try {
+                val ok = withContext(Dispatchers.IO) { renderer.prepare() }
+                if (!ok) {
+                    Toast.makeText(context, "Eine Audio-Datei fehlt oder ist unlesbar", Toast.LENGTH_LONG).show()
                     playing = false
-                    break
+                    return@LaunchedEffect
                 }
+                val startBar = editor.cursorBar
+                player.start(renderer, (startBar * renderer.framesPerBar).toLong())
+                var lastSet = startBar
+                while (true) {
+                    withFrameNanos { }
+                    if (editor.cursorBar != lastSet) {
+                        // Der Nutzer hat den Cursor verschoben: von dort aus neu starten
+                        restartKey += 1
+                        return@LaunchedEffect
+                    }
+                    val newBar = minOf(
+                        startBar + player.playedFrames() / renderer.framesPerBar,
+                        editor.endBar()
+                    )
+                    editor.cursorBar = newBar
+                    lastSet = newBar
+                    if (player.finished) {
+                        editor.cursorBar = editor.endBar()
+                        playing = false
+                        return@LaunchedEffect
+                    }
+                }
+            } finally {
+                player.stop()
+                renderer.close()
             }
         }
     }
@@ -256,12 +288,21 @@ fun ProjectScreen(
             PillButton(
                 text = "ex.",
                 onClick = {
-                    val message = if (editor.endBar() <= 0.0) {
-                        "Noch kein Audio vorhanden"
+                    if (editor.endBar() <= 0.0) {
+                        Toast.makeText(context, "Noch kein Audio vorhanden", Toast.LENGTH_SHORT).show()
                     } else {
-                        "Export folgt im nächsten Schritt"
+                        Toast.makeText(context, "Export läuft …", Toast.LENGTH_SHORT).show()
+                        val snapshot = editor.project
+                        scope.launch {
+                            val name = withContext(Dispatchers.IO) { Exporter.export(context, snapshot) }
+                            val message = if (name != null) {
+                                "Gespeichert in Downloads: $name"
+                            } else {
+                                "Export fehlgeschlagen"
+                            }
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        }
                     }
-                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                 }
             )
             Box {
