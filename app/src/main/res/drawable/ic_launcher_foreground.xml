@@ -1,0 +1,29 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- linker Ohrhörer -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,48a10,10 0 1,0 20,0a10,10 0 1,0 -20,0" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,54L44,54L44,72Q44,76 40,76Q36,76 36,72Z" />
+
+    <!-- rechter Ohrhörer -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M58,48a10,10 0 1,0 20,0a10,10 0 1,0 -20,0" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M64,54L72,54L72,72Q72,76 68,76Q64,76 64,72Z" />
+
+    <!-- Kabel -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M40,76Q54,92 68,76" />
+</vector>
