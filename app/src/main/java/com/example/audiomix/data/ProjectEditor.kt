@@ -56,6 +56,12 @@ class ProjectEditor(
         update(project.copy(name = name))
     }
 
+    /** Setzt das Projekt-Tempo (die gedehnten Audio-Dateien müssen vorher bereitliegen). */
+    fun setBpm(newBpm: Int) {
+        val durationMs = (endBar() * 4.0 * 60_000.0 / newBpm).toLong()
+        update(project.copy(bpm = newBpm, durationMs = durationMs))
+    }
+
     fun addDrumClip() {
         val clip = Clip(
             id = UUID.randomUUID().toString(),
@@ -65,14 +71,15 @@ class ProjectEditor(
         insertClip(TrackType.DRUM, clip)
     }
 
-    fun addAudioClip(fileName: String, lengthBar: Double, startBar: Double) {
+    fun addAudioClip(fileName: String, lengthBar: Double, startBar: Double, sourceBpm: Double) {
         val clip = Clip(
             id = UUID.randomUUID().toString(),
             startBar = startBar,
             lengthBar = lengthBar,
             offsetBar = 0.0,
             sourceFile = fileName,
-            sourceLengthBar = lengthBar
+            sourceLengthBar = lengthBar,
+            sourceBpm = sourceBpm
         )
         insertClip(TrackType.AUDIO, clip)
     }
