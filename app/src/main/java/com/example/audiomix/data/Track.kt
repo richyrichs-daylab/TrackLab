@@ -2,6 +2,8 @@ package com.example.audiomix.data
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
+import kotlin.math.abs
 
 enum class TrackType { AUDIO, DRUM }
 
@@ -43,11 +45,22 @@ data class Clip(
 data class Track(
     val id: String,
     val type: TrackType,
-    val clips: List<Clip>
+    val clips: List<Clip>,
+    /** Eigener Name der Zeile (null = Standardname "Musikzeile N"). */
+    val name: String? = null,
+    /** Tempo der Zeile in bpm (nur Audiozeilen; 0 = folgt dem Projekt). */
+    val bpm: Double = 0.0
 ) {
+    /** Das Tempo, in dem diese Zeile tatsächlich klingt. */
+    fun tempo(projectBpm: Int): Double = if (bpm > 0.0) bpm else projectBpm.toDouble()
+
+    fun displayName(index: Int): String = name ?: "Musikzeile ${index + 1}"
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
         put("type", type.name)
+        put("bpm", bpm)
+        if (name != null) put("name", name)
         put("clips", JSONArray().apply { clips.forEach { put(it.toJson()) } })
     }
 
@@ -61,8 +74,20 @@ data class Track(
             return Track(
                 id = o.getString("id"),
                 type = TrackType.valueOf(o.getString("type")),
-                clips = clips
+                clips = clips,
+                name = if (o.has("name")) o.getString("name") else null,
+                bpm = o.optDouble("bpm", 0.0)
             )
         }
+    }
+}
+
+/** Zeigt ganze Zahlen ohne Nachkommastelle, sonst mit einer. */
+fun formatBpm(value: Double): String {
+    val rounded = Math.round(value)
+    return if (abs(value - rounded) < 0.05) {
+        rounded.toString()
+    } else {
+        String.format(Locale.US, "%.1f", value)
     }
 }
