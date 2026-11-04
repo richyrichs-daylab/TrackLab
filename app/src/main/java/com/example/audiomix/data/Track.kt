@@ -11,7 +11,9 @@ data class Clip(
     val lengthBar: Double,
     val offsetBar: Double = 0.0,
     val sourceFile: String? = null,
-    val sourceLengthBar: Double = 0.0
+    val sourceLengthBar: Double = 0.0,
+    /** Tempo der Original-Datei (bpm). */
+    val sourceBpm: Double = 100.0
 ) {
     val endBar: Double get() = startBar + lengthBar
 
@@ -21,6 +23,7 @@ data class Clip(
         put("lengthBar", lengthBar)
         put("offsetBar", offsetBar)
         put("sourceLengthBar", sourceLengthBar)
+        put("sourceBpm", sourceBpm)
         if (sourceFile != null) put("sourceFile", sourceFile)
     }
 
@@ -31,7 +34,8 @@ data class Clip(
             lengthBar = o.getDouble("lengthBar"),
             offsetBar = o.optDouble("offsetBar", 0.0),
             sourceFile = if (o.has("sourceFile")) o.getString("sourceFile") else null,
-            sourceLengthBar = o.optDouble("sourceLengthBar", 0.0)
+            sourceLengthBar = o.optDouble("sourceLengthBar", 0.0),
+            sourceBpm = o.optDouble("sourceBpm", 100.0)
         )
     }
 }
