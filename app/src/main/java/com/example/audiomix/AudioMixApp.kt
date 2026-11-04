@@ -50,6 +50,10 @@ fun AudioMixApp(repo: ProjectRepository, settings: SettingsStore) {
                 onDarkModeChange = {
                     darkMode = it
                     settings.darkMode = it
+                },
+                onClose = {
+                    reload()
+                    screen = "start"
                 }
             )
 
