@@ -8,15 +8,32 @@ android {
     namespace = "com.example.audiomix"
     compileSdk = 35
 
+    // Zählt bei jedem GitHub-Build automatisch hoch (nötig für Updates)
+    val runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toInt()
+
     defaultConfig {
         applicationId = "com.example.audiomix"
         minSdk = 29
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4"
+        versionCode = 100 + runNumber
+        versionName = "0.5.$runNumber"
+    }
+
+    signingConfigs {
+        create("audiomix") {
+            storeFile = file("signing/audiomix.jks")
+            storePassword = "audiomix123"
+            keyAlias = "audiomix"
+            keyPassword = "audiomix123"
+        }
     }
 
     buildTypes {
+        getByName("debug") {
+            if (file("signing/audiomix.jks").exists()) {
+                signingConfig = signingConfigs.getByName("audiomix")
+            }
+        }
         release {
             isMinifyEnabled = false
         }
