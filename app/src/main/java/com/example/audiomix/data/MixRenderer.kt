@@ -39,7 +39,7 @@ class MixRenderer(
     context: Context,
     private val projectId: String,
     private val tracks: List<Track>,
-    bpm: Int
+    private val bpm: Int
 ) {
     companion object {
         const val RATE = 44100
@@ -59,15 +59,21 @@ class MixRenderer(
         ((tracks.flatMap { it.clips }.maxOfOrNull { it.endBar } ?: 0.0) * framesPerBar).toLong() +
             TAIL_FRAMES
 
-    /** Stellt sicher, dass alle MP3s mischfertig vorliegen. Gibt false zurück, wenn eine Datei fehlt. */
+    private fun fileKey(name: String, sourceBpm: Double): String =
+        "$name|${StretchFiles.key(bpm / sourceBpm)}"
+
+    /** Stellt sicher, dass alle MP3s im richtigen Tempo mischfertig vorliegen. */
     fun prepare(): Boolean {
         for (track in tracks) {
             if (track.type != TrackType.AUDIO) continue
             for (clip in track.clips) {
                 val name = clip.sourceFile ?: continue
-                if (pcmFiles.containsKey(name)) continue
-                val pcm = AudioImport.ensurePcm(appContext, projectId, name) ?: return false
-                pcmFiles[name] = RandomAccessFile(pcm, "r")
+                val key = fileKey(name, clip.sourceBpm)
+                if (pcmFiles.containsKey(key)) continue
+                val pcm = StretchFiles.ensure(
+                    appContext, projectId, name, bpm / clip.sourceBpm, { }, { false }
+                ) ?: return false
+                pcmFiles[key] = RandomAccessFile(pcm, "r")
             }
         }
         return true
@@ -104,7 +110,7 @@ class MixRenderer(
 
     private fun mixAudio(clip: Clip, startFrame: Long, endFrame: Long, acc: IntArray) {
         val name = clip.sourceFile ?: return
-        val file = pcmFiles[name] ?: return
+        val file = pcmFiles[fileKey(name, clip.sourceBpm)] ?: return
         val clipStart = (clip.startBar * framesPerBar).toLong()
         val clipEnd = ((clip.startBar + clip.lengthBar) * framesPerBar).toLong()
         val from = maxOf(startFrame, clipStart)
