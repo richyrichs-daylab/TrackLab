@@ -59,8 +59,10 @@ class MixRenderer(
         ((tracks.flatMap { it.clips }.maxOfOrNull { it.endBar } ?: 0.0) * framesPerBar).toLong() +
             TAIL_FRAMES
 
-    private fun fileKey(name: String, sourceBpm: Double): String =
-        "$name|${StretchFiles.key(bpm / sourceBpm)}"
+    private fun speedFor(track: Track, clip: Clip): Double = track.tempo(bpm) / clip.sourceBpm
+
+    private fun fileKey(name: String, speed: Double): String =
+        "$name|${StretchFiles.key(speed)}"
 
     /** Stellt sicher, dass alle MP3s im richtigen Tempo mischfertig vorliegen. */
     fun prepare(): Boolean {
@@ -68,10 +70,11 @@ class MixRenderer(
             if (track.type != TrackType.AUDIO) continue
             for (clip in track.clips) {
                 val name = clip.sourceFile ?: continue
-                val key = fileKey(name, clip.sourceBpm)
+                val speed = speedFor(track, clip)
+                val key = fileKey(name, speed)
                 if (pcmFiles.containsKey(key)) continue
                 val pcm = StretchFiles.ensure(
-                    appContext, projectId, name, bpm / clip.sourceBpm, { }, { false }
+                    appContext, projectId, name, speed, { }, { false }
                 ) ?: return false
                 pcmFiles[key] = RandomAccessFile(pcm, "r")
             }
@@ -86,7 +89,7 @@ class MixRenderer(
         for (track in tracks) {
             for (clip in track.clips) {
                 if (track.type == TrackType.AUDIO) {
-                    mixAudio(clip, startFrame, endFrame, acc)
+                    mixAudio(track, clip, startFrame, endFrame, acc)
                 } else {
                     mixDrum(clip, startFrame, endFrame, acc)
                 }
@@ -108,9 +111,9 @@ class MixRenderer(
         pcmFiles.clear()
     }
 
-    private fun mixAudio(clip: Clip, startFrame: Long, endFrame: Long, acc: IntArray) {
+    private fun mixAudio(track: Track, clip: Clip, startFrame: Long, endFrame: Long, acc: IntArray) {
         val name = clip.sourceFile ?: return
-        val file = pcmFiles[fileKey(name, clip.sourceBpm)] ?: return
+        val file = pcmFiles[fileKey(name, speedFor(track, clip))] ?: return
         val clipStart = (clip.startBar * framesPerBar).toLong()
         val clipEnd = ((clip.startBar + clip.lengthBar) * framesPerBar).toLong()
         val from = maxOf(startFrame, clipStart)
