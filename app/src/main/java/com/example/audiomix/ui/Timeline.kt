@@ -352,12 +352,15 @@ fun Timeline(
                             1f
                         )
                     }
-                    if (isBar) {
-                        drawText(
-                            textMeasurer,
+                    // Taktzahl nur zeichnen, wenn sie sichtbar ist (sonst stürzt die App ab)
+                    if (isBar && x > -40.dp.toPx() && x < w) {
+                        val label = textMeasurer.measure(
                             (i / div + 1).toString(),
-                            topLeft = Offset(x + 4.dp.toPx(), handleH + 3.dp.toPx()),
                             style = TextStyle(color = colors.rulerText, fontSize = 15.sp)
+                        )
+                        drawText(
+                            label,
+                            topLeft = Offset(x + 4.dp.toPx(), handleH + 3.dp.toPx())
                         )
                     }
                 }
