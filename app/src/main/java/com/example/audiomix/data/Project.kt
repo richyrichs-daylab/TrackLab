@@ -23,11 +23,20 @@ data class Project(
     companion object {
         fun fromJson(text: String): Project {
             val o = JSONObject(text)
+            val projectBpm = o.optInt("bpm", 100)
             val array = o.optJSONArray("tracks")
-            val tracks = ArrayList<Track>()
+            val loaded = ArrayList<Track>()
             if (array != null) {
                 for (i in 0 until array.length()) {
-                    tracks.add(Track.fromJson(array.getJSONObject(i)))
+                    loaded.add(Track.fromJson(array.getJSONObject(i)))
+                }
+            }
+            // Ältere Audiozeilen ohne eigenes Tempo bekommen das Projekt-Tempo
+            val tracks = loaded.map {
+                if (it.type == TrackType.AUDIO && it.bpm <= 0.0) {
+                    it.copy(bpm = projectBpm.toDouble())
+                } else {
+                    it
                 }
             }
             return Project(
@@ -35,7 +44,7 @@ data class Project(
                 name = o.getString("name"),
                 lastModified = o.getLong("lastModified"),
                 durationMs = o.optLong("durationMs", 0L),
-                bpm = o.optInt("bpm", 100),
+                bpm = projectBpm,
                 tracks = tracks
             )
         }
