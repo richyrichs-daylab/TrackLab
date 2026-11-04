@@ -409,7 +409,7 @@ fun Timeline(
                                 var x = x0
                                 while (x < x1) {
                                     val barInClip = (x - left) / barPx
-                                    val sec = (c.offsetBar + barInClip) * secondsPerBar * (editor.project.bpm / c.sourceBpm)
+                                    val sec = (c.offsetBar + barInClip) * secondsPerBar * ((if (t.bpm > 0.0) t.bpm else editor.project.bpm.toDouble()) / c.sourceBpm)
                                     val idx = (sec * AudioImport.PEAKS_PER_SECOND).toInt()
                                     if (idx >= 0 && idx < data.size) {
                                         val amp = (data[idx].toInt() and 0xFF) / 255f
