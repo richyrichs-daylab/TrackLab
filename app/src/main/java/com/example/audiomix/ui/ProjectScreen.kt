@@ -71,6 +71,8 @@ import com.example.audiomix.data.Project
 import com.example.audiomix.data.ProjectEditor
 import com.example.audiomix.data.StretchFiles
 import com.example.audiomix.data.TrackType
+import com.example.audiomix.data.formatBpm
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlinx.coroutines.Dispatchers
@@ -120,8 +122,13 @@ fun ProjectScreen(
 
     /** Fortschritt in Prozent, solange gearbeitet wird (null = nichts los). */
     var busyPercent by remember { mutableStateOf<Int?>(null) }
+
+    /** Neues Projekt-Tempo, zu dem gerade noch eine Rückfrage offen ist. */
+    var bpmQuestion by remember { mutableStateOf<Int?>(null) }
+
     var pendingImport by remember { mutableStateOf<AudioImport.Imported?>(null) }
     var importTempoText by remember { mutableStateOf("") }
+    var importTarget by remember { mutableDoubleStateOf(100.0) }
 
     DisposableEffect(Unit) {
         onDispose { player.stop() }
@@ -130,31 +137,22 @@ fun ProjectScreen(
     fun speedRangeOk(targetBpm: Double, sourceBpm: Double): Boolean =
         targetBpm / sourceBpm in 0.25..4.0
 
-    // ---- BPM ändern ----
-    fun startBpmChange(newBpm: Int) {
-        if (newBpm == editor.project.bpm) return
-        val audioClips = editor.tracks.filter { it.type == TrackType.AUDIO }.flatMap { it.clips }
-        val needed = audioClips.mapNotNull { c -> c.sourceFile?.let { Pair(it, c.sourceBpm) } }.distinct()
+    /** Räumt gedehnte Dateien weg, die nicht mehr gebraucht werden. */
+    fun cleanupStretched() {
+        val projectBpm = editor.project.bpm
+        val keep = editor.tracks
+            .filter { it.type == TrackType.AUDIO }
+            .flatMap { t ->
+                t.clips.mapNotNull { c ->
+                    c.sourceFile?.let { StretchFiles.fileNameFor(it, t.tempo(projectBpm) / c.sourceBpm) }
+                }
+            }
+            .toSet()
+        scope.launch(Dispatchers.IO) { StretchFiles.cleanup(context, project.id, keep) }
+    }
 
-        playing = false
-        if (needed.isEmpty()) {
-            editor.setBpm(newBpm)
-            return
-        }
-
-        val lo = needed.maxOf { it.second * 0.25 }
-        val hi = needed.minOf { it.second * 4.0 }
-        if (newBpm < lo || newBpm > hi) {
-            val low = maxOf(6, ceil(lo).toInt())
-            val high = minOf(400, floor(hi).toInt())
-            Toast.makeText(
-                context,
-                "Mit den vorhandenen Audio-Dateien sind nur $low–$high bpm möglich",
-                Toast.LENGTH_LONG
-            ).show()
-            return
-        }
-
+    /** Erzeugt die gedehnten Dateien (mit Lade-Overlay) und führt danach [onSuccess] aus. */
+    fun runStretchJob(needed: List<Pair<String, Double>>, onSuccess: () -> Unit) {
         busyPercent = 0
         scope.launch {
             val ok = withContext(Dispatchers.Default) {
@@ -165,7 +163,7 @@ fun ProjectScreen(
                         context,
                         project.id,
                         item.first,
-                        newBpm / item.second,
+                        item.second,
                         { f -> busyPercent = ((done + f) / needed.size * 100f).toInt() },
                         { !isActive }
                     )
@@ -178,21 +176,65 @@ fun ProjectScreen(
                 allOk
             }
             if (ok) {
-                editor.setBpm(newBpm)
-                val keep = editor.tracks
-                    .filter { it.type == TrackType.AUDIO }
-                    .flatMap { it.clips }
-                    .mapNotNull { c ->
-                        c.sourceFile?.let {
-                            StretchFiles.fileNameFor(it, editor.project.bpm / c.sourceBpm)
-                        }
-                    }
-                    .toSet()
-                withContext(Dispatchers.IO) { StretchFiles.cleanup(context, project.id, keep) }
+                onSuccess()
+                cleanupStretched()
             } else {
-                Toast.makeText(context, "BPM-Änderung fehlgeschlagen", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Die Änderung ist fehlgeschlagen", Toast.LENGTH_LONG).show()
             }
             busyPercent = null
+        }
+    }
+
+    // ---- Projekt-BPM ändern ----
+    fun runBpmChange(newBpm: Int, includeDiffering: Boolean) {
+        playing = false
+        val projectBpm = editor.project.bpm
+        val p = projectBpm.toDouble()
+        val changed = editor.tracks.filter {
+            it.type == TrackType.AUDIO &&
+                (includeDiffering || abs(it.tempo(projectBpm) - p) < 0.0005)
+        }
+        val changedIds = changed.map { it.id }.toSet()
+        val clips = changed.flatMap { it.clips }.filter { it.sourceFile != null }
+
+        if (clips.isNotEmpty()) {
+            val lo = clips.maxOf { it.sourceBpm * 0.25 }
+            val hi = clips.minOf { it.sourceBpm * 4.0 }
+            if (newBpm < lo || newBpm > hi) {
+                val low = maxOf(6, ceil(lo).toInt())
+                val high = minOf(400, floor(hi).toInt())
+                Toast.makeText(
+                    context,
+                    "Mit den betroffenen Audio-Dateien sind nur $low–$high bpm möglich",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+        }
+
+        val needed = clips
+            .map { Pair(it.sourceFile!!, newBpm / it.sourceBpm) }
+            .distinctBy { "${it.first}|${StretchFiles.key(it.second)}" }
+
+        if (needed.isEmpty()) {
+            editor.applyProjectBpm(newBpm, changedIds)
+            cleanupStretched()
+            return
+        }
+        runStretchJob(needed) { editor.applyProjectBpm(newBpm, changedIds) }
+    }
+
+    fun startBpmChange(newBpm: Int) {
+        if (newBpm == editor.project.bpm) return
+        val projectBpm = editor.project.bpm
+        val p = projectBpm.toDouble()
+        val hasDiffering = editor.tracks.any {
+            it.type == TrackType.AUDIO && abs(it.tempo(projectBpm) - p) > 0.0005
+        }
+        if (hasDiffering) {
+            bpmQuestion = newBpm
+        } else {
+            runBpmChange(newBpm, false)
         }
     }
 
@@ -206,52 +248,83 @@ fun ProjectScreen(
         startBpmChange(value)
     }
 
+    // ---- BPM einer einzelnen Zeile ändern ----
+    fun commitRowBpm(trackId: String, text: String) {
+        val typed = text.replace(',', '.').toDoubleOrNull() ?: return
+        val value = typed.coerceIn(6.0, 400.0)
+        val track = editor.tracks.firstOrNull { it.id == trackId } ?: return
+        if (abs(value - track.tempo(editor.project.bpm)) < 0.0005) return
+        playing = false
+
+        val clips = track.clips.filter { it.sourceFile != null }
+        if (clips.isNotEmpty()) {
+            val lo = clips.maxOf { it.sourceBpm * 0.25 }
+            val hi = clips.minOf { it.sourceBpm * 4.0 }
+            if (value < lo || value > hi) {
+                val low = maxOf(6, ceil(lo).toInt())
+                val high = minOf(400, floor(hi).toInt())
+                Toast.makeText(
+                    context,
+                    "Für diese Zeile sind nur $low–$high bpm möglich",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+        }
+        val needed = clips
+            .map { Pair(it.sourceFile!!, value / it.sourceBpm) }
+            .distinctBy { "${it.first}|${StretchFiles.key(it.second)}" }
+
+        if (needed.isEmpty()) {
+            editor.applyRowBpm(trackId, value)
+            cleanupStretched()
+            return
+        }
+        runStretchJob(needed) { editor.applyRowBpm(trackId, value) }
+    }
+
     // ---- MP3 importieren (nach der Tempo-Frage) ----
     fun confirmImport(imported: AudioImport.Imported, adapt: Boolean) {
         val projectBpm = editor.project.bpm
-        val sourceBpm: Double
+        val selected = editor.tracks.firstOrNull {
+            it.id == editor.selectedTrackId && it.type == TrackType.AUDIO
+        }
+        val typed = importTempoText.replace(',', '.').toDoubleOrNull()
+        if (typed == null || typed < 6.0 || typed > 400.0) {
+            Toast.makeText(context, "Bitte ein Tempo zwischen 6 und 400 eingeben", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val rowBpm: Double
+        val join: Boolean
         if (adapt) {
-            val parsed = importTempoText.replace(',', '.').toDoubleOrNull()
-            if (parsed == null || parsed < 6.0 || parsed > 400.0) {
-                Toast.makeText(context, "Bitte ein Tempo zwischen 6 und 400 eingeben", Toast.LENGTH_SHORT).show()
-                return
-            }
-            if (!speedRangeOk(projectBpm.toDouble(), parsed)) {
+            if (!speedRangeOk(importTarget, typed)) {
                 Toast.makeText(context, "Das Tempo weicht zu stark ab (höchstens Faktor 4)", Toast.LENGTH_LONG).show()
                 return
             }
-            sourceBpm = parsed
+            rowBpm = importTarget
+            join = selected != null
         } else {
-            sourceBpm = projectBpm.toDouble()
+            rowBpm = typed
+            join = selected != null && abs(selected.tempo(projectBpm) - typed) < 0.0005
+            if (selected != null && !join) {
+                Toast.makeText(
+                    context,
+                    "Anderes Tempo als die gewählte Zeile: Die Datei kommt in eine neue Zeile",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
         pendingImport = null
 
         val startBar = pendingBar
-        val lengthBar = imported.durationSec * sourceBpm / 240.0
-        val speed = projectBpm / sourceBpm
-
+        val speed = rowBpm / typed
         if (StretchFiles.isOriginal(speed)) {
-            editor.addAudioClip(imported.fileName, lengthBar, startBar, sourceBpm)
+            editor.addAudioClip(imported.fileName, imported.durationSec, startBar, typed, rowBpm, join)
             return
         }
-        busyPercent = 0
-        scope.launch {
-            val file = withContext(Dispatchers.Default) {
-                StretchFiles.ensure(
-                    context,
-                    project.id,
-                    imported.fileName,
-                    speed,
-                    { f -> busyPercent = (f * 100f).toInt() },
-                    { !isActive }
-                )
-            }
-            if (file != null) {
-                editor.addAudioClip(imported.fileName, lengthBar, startBar, sourceBpm)
-            } else {
-                Toast.makeText(context, "Anpassen fehlgeschlagen", Toast.LENGTH_LONG).show()
-            }
-            busyPercent = null
+        runStretchJob(listOf(Pair(imported.fileName, speed))) {
+            editor.addAudioClip(imported.fileName, imported.durationSec, startBar, typed, rowBpm, join)
         }
     }
 
@@ -270,7 +343,11 @@ fun ProjectScreen(
                         Toast.LENGTH_LONG
                     ).show()
                 } else {
-                    importTempoText = editor.project.bpm.toString()
+                    val selected = editor.tracks.firstOrNull {
+                        it.id == editor.selectedTrackId && it.type == TrackType.AUDIO
+                    }
+                    importTarget = selected?.tempo(editor.project.bpm) ?: editor.project.bpm.toDouble()
+                    importTempoText = formatBpm(importTarget)
                     pendingImport = imported
                 }
             }
@@ -525,57 +602,87 @@ fun ProjectScreen(
                     modifier = Modifier.weight(1f)
                 )
 
-                // ---- Unterer Bereich: Mülleimer + Play/Pause ----
-                Box(
+                // ---- Unterer Bereich: Zeilen-Leiste, Mülleimer, Play/Pause ----
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(150.dp)
                         .background(colors.timelineBg)
                 ) {
-                    if (editor.selectedTrackId != null) {
-                        Text(
-                            text = "🗑️",
-                            fontSize = 44.sp,
-                            modifier = Modifier
-                                .align(Alignment.CenterStart)
-                                .padding(start = 24.dp)
-                                .clickable { editor.deleteSelection() }
-                                .padding(8.dp)
+                    val selectedRow = editor.tracks.withIndex()
+                        .firstOrNull { it.value.id == editor.selectedTrackId }
+                    if (selectedRow != null) {
+                        val row = selectedRow.value
+                        RowInfoBar(
+                            trackId = row.id,
+                            name = row.displayName(selectedRow.index),
+                            bpmText = formatBpm(row.tempo(editor.project.bpm)),
+                            bpmEditable = row.type == TrackType.AUDIO,
+                            onRename = { editor.renameTrack(row.id, it) },
+                            onBpmCommit = { commitRowBpm(row.id, it) },
+                            onBpmLocked = {
+                                Toast.makeText(
+                                    context,
+                                    "Trommeln folgen immer dem Projekt-Tempo",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
                         )
                     }
+
                     Box(
                         modifier = Modifier
-                            .align(Alignment.Center)
-                            .size(110.dp)
-                            .clip(CircleShape)
-                            .background(Color.Black)
-                            .clickable {
-                                if (playing) {
-                                    playing = false
-                                } else {
-                                    val end = editor.endBar()
-                                    if (end <= 0.0) {
-                                        Toast.makeText(context, "Noch kein Audio vorhanden", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        if (editor.cursorBar >= end) editor.cursorBar = 0.0
-                                        playing = true
-                                    }
-                                }
-                            },
-                        contentAlignment = Alignment.Center
+                            .fillMaxWidth()
+                            .height(150.dp)
                     ) {
+                        if (editor.selectedTrackId != null) {
+                            Text(
+                                text = "🗑️",
+                                fontSize = 44.sp,
+                                modifier = Modifier
+                                    .align(Alignment.CenterStart)
+                                    .padding(start = 24.dp)
+                                    .clickable { editor.deleteSelection() }
+                                    .padding(8.dp)
+                            )
+                        }
                         Box(
                             modifier = Modifier
-                                .size(84.dp)
+                                .align(Alignment.Center)
+                                .size(110.dp)
                                 .clip(CircleShape)
-                                .background(Color.White),
+                                .background(Color.Black)
+                                .clickable {
+                                    if (playing) {
+                                        playing = false
+                                    } else {
+                                        val end = editor.endBar()
+                                        if (end <= 0.0) {
+                                            Toast.makeText(
+                                                context,
+                                                "Noch kein Audio vorhanden",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        } else {
+                                            if (editor.cursorBar >= end) editor.cursorBar = 0.0
+                                            playing = true
+                                        }
+                                    }
+                                },
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = if (playing) "⏸" else "▶",
-                                fontSize = 40.sp,
-                                color = if (playing) Color(0xFFFF9800) else Color(0xFFB02060)
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(84.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (playing) "⏸" else "▶",
+                                    fontSize = 40.sp,
+                                    color = if (playing) Color(0xFFFF9800) else Color(0xFFB02060)
+                                )
+                            }
                         }
                     }
                 }
@@ -619,6 +726,38 @@ fun ProjectScreen(
         }
     }
 
+    // ---- Rückfrage: abweichende Zeilen beim Ändern der Projekt-BPM ----
+    val question = bpmQuestion
+    if (question != null) {
+        val projectBpm = editor.project.bpm
+        val differing = editor.tracks.withIndex().filter {
+            it.value.type == TrackType.AUDIO &&
+                abs(it.value.tempo(projectBpm) - projectBpm) > 0.0005
+        }
+        val questionText = if (differing.size == 1) {
+            "Soll die BPM von „${differing[0].value.displayName(differing[0].index)}“ auch geändert werden?"
+        } else {
+            "Soll die BPM von mehreren Musikzeilen auch geändert werden?"
+        }
+        AlertDialog(
+            onDismissRequest = { bpmQuestion = null },
+            title = { Text("BPM auf $question ändern") },
+            text = { Text(questionText) },
+            confirmButton = {
+                TextButton(onClick = {
+                    bpmQuestion = null
+                    runBpmChange(question, true)
+                }) { Text("Ja") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    bpmQuestion = null
+                    runBpmChange(question, false)
+                }) { Text("Nein") }
+            }
+        )
+    }
+
     // ---- Tempo-Frage nach dem MP3-Import ----
     val pending = pendingImport
     if (pending != null) {
@@ -633,8 +772,9 @@ fun ProjectScreen(
             text = {
                 Column {
                     Text(
-                        "Soll die Datei an das Tempo des Projekts (${editor.project.bpm} bpm) " +
-                            "angepasst werden? Außerhalb tippen bricht den Import ab."
+                        "Soll die Datei an das vorhandene Tempo (${formatBpm(importTarget)} bpm) " +
+                            "angepasst werden? „Nein“ lässt sie im Originaltempo. " +
+                            "Außerhalb tippen bricht den Import ab."
                     )
                     Spacer(Modifier.height(12.dp))
                     OutlinedTextField(
