@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.util.UUID
+import kotlin.math.abs
 
 class ProjectEditor(
     initial: Project,
@@ -49,18 +50,78 @@ class ProjectEditor(
         selectedClipId = null
     }
 
-    // ---------- Änderungen ----------
+    // ---------- Namen ----------
 
     fun rename(newName: String) {
         val name = newName.trim().ifBlank { project.name }
         update(project.copy(name = name))
     }
 
-    /** Setzt das Projekt-Tempo (die gedehnten Audio-Dateien müssen vorher bereitliegen). */
-    fun setBpm(newBpm: Int) {
-        val durationMs = (endBar() * 4.0 * 60_000.0 / newBpm).toLong()
-        update(project.copy(bpm = newBpm, durationMs = durationMs))
+    /** Leerer Name setzt den Standardnamen "Musikzeile N" wieder ein. */
+    fun renameTrack(trackId: String, newName: String) {
+        val name = newName.trim().ifBlank { null }
+        update(
+            project.copy(
+                tracks = tracks.map { if (it.id == trackId) it.copy(name = name) else it }
+            )
+        )
     }
+
+    // ---------- Tempo ----------
+
+    /**
+     * Setzt das Projekt-Tempo. Die Zeilen in [changedRowIds] bekommen das neue Tempo,
+     * alle anderen Audiozeilen behalten ihr eigenes (ihre Blöcke werden in Takten umgerechnet).
+     * Die gedehnten Audio-Dateien müssen vorher bereitliegen.
+     */
+    fun applyProjectBpm(newBpm: Int, changedRowIds: Set<String>) {
+        val p = project.bpm.toDouble()
+        val p2 = newBpm.toDouble()
+        val newTracks = tracks.map { t ->
+            if (t.type != TrackType.AUDIO) {
+                t
+            } else {
+                val r = t.tempo(project.bpm)
+                val r2 = if (t.id in changedRowIds) p2 else r
+                val factor = (p2 / r2) / (p / r)
+                t.copy(bpm = r2, clips = rescale(t.clips, factor))
+            }
+        }
+        undoStack.clear()
+        redoStack.clear()
+        refreshFlags()
+        update(
+            project.copy(
+                bpm = newBpm,
+                tracks = newTracks,
+                durationMs = durationFor(newTracks, newBpm)
+            )
+        )
+    }
+
+    /** Setzt das Tempo einer einzelnen Audiozeile (die gedehnten Dateien liegen vorher bereit). */
+    fun applyRowBpm(trackId: String, newBpm: Double) {
+        val newTracks = tracks.map { t ->
+            if (t.id == trackId && t.type == TrackType.AUDIO) {
+                val r = t.tempo(project.bpm)
+                val factor = r / newBpm
+                t.copy(bpm = newBpm, clips = rescale(t.clips, factor))
+            } else {
+                t
+            }
+        }
+        undoStack.clear()
+        redoStack.clear()
+        refreshFlags()
+        update(
+            project.copy(
+                tracks = newTracks,
+                durationMs = durationFor(newTracks, project.bpm)
+            )
+        )
+    }
+
+    // ---------- Blöcke ----------
 
     fun addDrumClip() {
         val clip = Clip(
@@ -71,7 +132,19 @@ class ProjectEditor(
         insertClip(TrackType.DRUM, clip)
     }
 
-    fun addAudioClip(fileName: String, lengthBar: Double, startBar: Double, sourceBpm: Double) {
+    /**
+     * Fügt eine MP3 ein. [rowBpm] ist das Tempo, in dem sie klingt, [sourceBpm] das Tempo der Datei.
+     * Bei [joinSelectedRow] kommt sie in die ausgewählte Audiozeile, sonst in eine neue Zeile.
+     */
+    fun addAudioClip(
+        fileName: String,
+        durationSec: Double,
+        startBar: Double,
+        sourceBpm: Double,
+        rowBpm: Double,
+        joinSelectedRow: Boolean
+    ) {
+        val lengthBar = durationSec * sourceBpm * project.bpm / (240.0 * rowBpm)
         val clip = Clip(
             id = UUID.randomUUID().toString(),
             startBar = startBar,
@@ -81,7 +154,20 @@ class ProjectEditor(
             sourceLengthBar = lengthBar,
             sourceBpm = sourceBpm
         )
-        insertClip(TrackType.AUDIO, clip)
+        val selected = tracks.firstOrNull { it.id == selectedTrackId }
+        val newTracks = if (joinSelectedRow && selected != null && selected.type == TrackType.AUDIO) {
+            tracks.map {
+                if (it.id == selected.id) it.copy(clips = overwrite(it.clips, clip)) else it
+            }
+        } else {
+            tracks + Track(
+                id = UUID.randomUUID().toString(),
+                type = TrackType.AUDIO,
+                clips = listOf(clip),
+                bpm = rowBpm
+            )
+        }
+        commitTracks(newTracks)
     }
 
     /** Fügt einen Clip in die ausgewählte Zeile (gleiche Audioart) oder in eine neue Zeile ein. */
@@ -130,7 +216,7 @@ class ProjectEditor(
     fun undo() {
         if (undoStack.isEmpty()) return
         redoStack.add(project.tracks)
-        applyTracks(undoStack.removeAt(undoStack.lastIndex))
+        applyTracks(withCurrentNames(undoStack.removeAt(undoStack.lastIndex)))
         fixSelection()
         refreshFlags()
     }
@@ -138,12 +224,39 @@ class ProjectEditor(
     fun redo() {
         if (redoStack.isEmpty()) return
         undoStack.add(project.tracks)
-        applyTracks(redoStack.removeAt(redoStack.lastIndex))
+        applyTracks(withCurrentNames(redoStack.removeAt(redoStack.lastIndex)))
         fixSelection()
         refreshFlags()
     }
 
     // ---------- intern ----------
+
+    /** Beim Rückgängig-Machen bleiben die aktuellen Zeilennamen erhalten. */
+    private fun withCurrentNames(snapshot: List<Track>): List<Track> =
+        snapshot.map { s ->
+            val current = tracks.firstOrNull { it.id == s.id }
+            if (current != null) s.copy(name = current.name) else s
+        }
+
+    private fun durationFor(list: List<Track>, bpm: Int): Long {
+        val end = list.flatMap { it.clips }.maxOfOrNull { it.endBar } ?: 0.0
+        return (end * 4.0 * 60_000.0 / bpm).toLong()
+    }
+
+    /** Rechnet Längen und Versatz um; Überlappungen werden vom späteren Block überschrieben. */
+    private fun rescale(clips: List<Clip>, factor: Double): List<Clip> {
+        if (abs(factor - 1.0) < 1e-9) return clips
+        var result: List<Clip> = emptyList()
+        for (c in clips.sortedBy { it.startBar }) {
+            val scaled = c.copy(
+                lengthBar = c.lengthBar * factor,
+                offsetBar = c.offsetBar * factor,
+                sourceLengthBar = c.sourceLengthBar * factor
+            )
+            result = overwrite(result, scaled)
+        }
+        return result
+    }
 
     private fun overwrite(clips: List<Clip>, newClip: Clip): List<Clip> {
         val s = newClip.startBar
@@ -181,9 +294,7 @@ class ProjectEditor(
     }
 
     private fun applyTracks(newTracks: List<Track>) {
-        val end = newTracks.flatMap { it.clips }.maxOfOrNull { it.endBar } ?: 0.0
-        val durationMs = (end * 4.0 * 60_000.0 / project.bpm).toLong()
-        update(project.copy(tracks = newTracks, durationMs = durationMs))
+        update(project.copy(tracks = newTracks, durationMs = durationFor(newTracks, project.bpm)))
     }
 
     private fun update(p: Project) {
