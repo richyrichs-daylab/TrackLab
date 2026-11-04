@@ -51,6 +51,7 @@ fun AudioMixApp(repo: ProjectRepository, settings: SettingsStore) {
                     darkMode = it
                     settings.darkMode = it
                 },
+                onBackupRestored = { reload() },
                 onClose = {
                     reload()
                     screen = "start"
