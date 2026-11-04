@@ -1,10 +1,18 @@
 package com.example.audiomix.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -13,42 +21,121 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 @Composable
-fun SettingsScreen(darkMode: Boolean, onDarkModeChange: (Boolean) -> Unit) {
+fun SettingsScreen(
+    darkMode: Boolean,
+    onDarkModeChange: (Boolean) -> Unit,
+    onClose: () -> Unit
+) {
     val colors = LocalAppColors.current
+    val context = LocalContext.current
 
-    Column(
+    val headingStyle = TextStyle(
+        brush = Brush.horizontalGradient(
+            listOf(Color(0xFFE8607A), Color(0xFF8E2C75))
+        ),
+        fontSize = 32.sp,
+        fontWeight = FontWeight.Black
+    )
+
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(colors.background)
-            .systemBarsPadding(),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .systemBarsPadding()
     ) {
-        Spacer(Modifier.height(12.dp))
-        Text(
-            text = "Einstellungen",
-            color = colors.onBackground,
-            fontSize = 40.sp,
-            fontWeight = FontWeight.Black
-        )
-        Spacer(Modifier.weight(1f))
-        Text(
-            text = "Dark mode?",
-            style = TextStyle(
-                brush = Brush.horizontalGradient(
-                    listOf(Color(0xFFE8607A), Color(0xFF8E2C75))
-                ),
-                fontSize = 32.sp,
-                fontWeight = FontWeight.Black
+        val third = maxHeight / 3
+
+        // ---- Titelzeile mit Zurück-Pfeil (wie auf der Projektseite) ----
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 8.dp, top = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                Text(
+                    text = "Einstellungen",
+                    color = colors.onBackground,
+                    fontSize = 40.sp,
+                    fontWeight = FontWeight.Black
+                )
+            }
+            Text(
+                text = "↑",
+                color = colors.onBackground,
+                fontSize = 40.sp,
+                modifier = Modifier
+                    .clickable(onClick = onClose)
+                    .padding(8.dp)
             )
-        )
-        Spacer(Modifier.height(16.dp))
-        Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
-        Spacer(Modifier.weight(1.4f))
+        }
+
+        // ---- Dark mode: Mitte bei einem Drittel der Höhe ----
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .offset(y = third)
+                .graphicsLayer { translationY = -size.height / 2f },
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(text = "Dark mode?", style = headingStyle)
+            Spacer(Modifier.height(16.dp))
+            Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
+        }
+
+        // ---- Backup: Mitte bei zwei Dritteln der Höhe ----
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .offset(y = third * 2)
+                .graphicsLayer { translationY = -size.height / 2f },
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(text = "Backup", style = headingStyle)
+            Spacer(Modifier.height(16.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Importieren",
+                    color = colors.onBackground,
+                    fontSize = 24.sp,
+                    modifier = Modifier
+                        .clickable {
+                            Toast.makeText(
+                                context,
+                                "Backup-Import kommt im nächsten Schritt",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                        .padding(vertical = 8.dp)
+                )
+                Text(
+                    text = " / ",
+                    color = colors.onBackground,
+                    fontSize = 24.sp
+                )
+                Text(
+                    text = "Exportieren",
+                    color = colors.onBackground,
+                    fontSize = 24.sp,
+                    modifier = Modifier
+                        .clickable {
+                            Toast.makeText(
+                                context,
+                                "Backup-Export kommt im nächsten Schritt",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                        .padding(vertical = 8.dp)
+                )
+            }
+        }
     }
 }
