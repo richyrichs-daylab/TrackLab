@@ -12,10 +12,7 @@ import kotlin.math.floor
 import kotlin.math.sin
 import kotlin.random.Random
 
-/** Synthetische Schlagzeug-Klänge. */
 object DrumSound {
-
-    /** Ein tiefer "Bumm". */
     fun hit(rate: Int): ShortArray {
         val length = (0.28 * rate).toInt()
         val out = ShortArray(length)
@@ -32,7 +29,6 @@ object DrumSound {
         return out
     }
 
-    /** Ein kurzes, helles Zischen (Hi-Hat). */
     fun hihat(rate: Int): ShortArray {
         val length = (0.09 * rate).toInt()
         val out = ShortArray(length)
@@ -49,47 +45,44 @@ object DrumSound {
     }
 }
 
-/**
- * Rechnet alle Zeilen eines Projekts zu einem einzigen Stereo-Signal zusammen
- * (44,1 kHz, 16 Bit). Wird zum Abspielen und zum Exportieren benutzt.
- */
+/** Rechnet alle Zeilen eines Projekts zu einem Stereo-Signal (44,1 kHz, 16 Bit) zusammen. */
 class MixRenderer(
     context: Context,
     private val projectId: String,
-    private val tracks: List<Track>,
+    tracks: List<Track>,
     private val bpm: Int
 ) {
     companion object {
         const val RATE = 44100
-
-        /** Kleine Nachlaufzeit, damit der letzte Schlag ausklingen kann. */
         const val TAIL_FRAMES = 13230
     }
+
+    private class Lane(val track: Track, val clips: List<Clip>)
 
     private val appContext = context.applicationContext
     private val drumHit = DrumSound.hit(RATE)
     private val hihatHit = DrumSound.hihat(RATE)
     private val pcmFiles = ConcurrentHashMap<String, RandomAccessFile>()
 
-    /** Wie viele Audio-Frames ein Takt lang ist. */
+    /** Nur hörbare Zeilen und Blöcke, Wiederholungen schon aufgelöst. */
+    private val lanes: List<Lane> = tracks
+        .filter { !it.muted && it.volume > 0 }
+        .map { t -> Lane(t, t.clips.filter { !it.muted }.flatMap { it.tiles() }) }
+
     val framesPerBar: Double = 240.0 / bpm * RATE
 
     val totalFrames: Long =
         ((tracks.flatMap { it.clips }.maxOfOrNull { it.endBar } ?: 0.0) * framesPerBar).toLong() +
             TAIL_FRAMES
 
-    private fun speedFor(track: Track, clip: Clip): Double = track.tempo(bpm) / clip.sourceBpm
+    private fun fileKey(name: String, speed: Double): String = "$name|${StretchFiles.key(speed)}"
 
-    private fun fileKey(name: String, speed: Double): String =
-        "$name|${StretchFiles.key(speed)}"
-
-    /** Stellt sicher, dass alle MP3s (stumme Zeilen ausgenommen) im richtigen Tempo vorliegen. */
     fun prepare(): Boolean {
-        for (track in tracks) {
-            if (track.type != TrackType.AUDIO || track.muted) continue
-            for (clip in track.clips) {
+        for (lane in lanes) {
+            if (lane.track.type != TrackType.AUDIO) continue
+            for (clip in lane.clips) {
                 val name = clip.sourceFile ?: continue
-                val speed = speedFor(track, clip)
+                val speed = clip.speed(lane.track.tempo(bpm))
                 val key = fileKey(name, speed)
                 if (pcmFiles.containsKey(key)) continue
                 val pcm = StretchFiles.ensure(
@@ -101,17 +94,16 @@ class MixRenderer(
         return true
     }
 
-    /** Füllt [out] mit [count] Stereo-Frames ab der Position [startFrame]. */
     fun render(startFrame: Long, count: Int, out: ShortArray) {
         val acc = IntArray(count * 2)
         val endFrame = startFrame + count
-        for (track in tracks) {
-            if (track.muted || track.volume <= 0) continue
-            for (clip in track.clips) {
-                when (track.type) {
-                    TrackType.AUDIO -> mixAudio(track, clip, startFrame, endFrame, acc)
-                    TrackType.DRUM -> mixHits(clip, drumHit, 0.0, track.volume, startFrame, endFrame, acc)
-                    TrackType.HIHAT -> mixHits(clip, hihatHit, 0.5, track.volume, startFrame, endFrame, acc)
+        for (lane in lanes) {
+            val gain = lane.track.volume
+            for (clip in lane.clips) {
+                when (lane.track.type) {
+                    TrackType.AUDIO -> mixAudio(lane.track, clip, gain, startFrame, endFrame, acc)
+                    TrackType.DRUM -> mixHits(clip, drumHit, 0.0, gain, startFrame, endFrame, acc)
+                    TrackType.HIHAT -> mixHits(clip, hihatHit, 0.5, gain, startFrame, endFrame, acc)
                 }
             }
         }
@@ -131,9 +123,16 @@ class MixRenderer(
         pcmFiles.clear()
     }
 
-    private fun mixAudio(track: Track, clip: Clip, startFrame: Long, endFrame: Long, acc: IntArray) {
+    private fun mixAudio(
+        track: Track,
+        clip: Clip,
+        gain: Int,
+        startFrame: Long,
+        endFrame: Long,
+        acc: IntArray
+    ) {
         val name = clip.sourceFile ?: return
-        val file = pcmFiles[fileKey(name, speedFor(track, clip))] ?: return
+        val file = pcmFiles[fileKey(name, clip.speed(track.tempo(bpm)))] ?: return
         val clipStart = (clip.startBar * framesPerBar).toLong()
         val clipEnd = ((clip.startBar + clip.lengthBar) * framesPerBar).toLong()
         val from = maxOf(startFrame, clipStart)
@@ -157,36 +156,33 @@ class MixRenderer(
         val frames = read / 4
         val samples = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
         val base = (from - startFrame).toInt() * 2
-        val gain = track.volume
         for (i in 0 until frames * 2) {
             acc[base + i] += samples.get(i).toInt() * gain / 100
         }
     }
 
-    /**
-     * Schläge im Takt-Raster: [offsetBeats] = 0 für Schläge auf den Zählzeiten (Trommel),
-     * 0,5 für Schläge genau dazwischen (Hitsch).
-     */
+    /** Schläge im Raster: [offsetHits] 0 = auf den Zählzeiten, 0,5 = genau dazwischen. */
     private fun mixHits(
         clip: Clip,
         sound: ShortArray,
-        offsetBeats: Double,
+        offsetHits: Double,
         gain: Int,
         startFrame: Long,
         endFrame: Long,
         acc: IntArray
     ) {
-        val framesPerBeat = framesPerBar / 4.0
+        val spacing = 1.0 / clip.stretch
+        val framesPerHit = framesPerBar / 4.0 * spacing
         val hitLength = sound.size
-        val kClipFirst = ceil(clip.startBar * 4.0 - offsetBeats - 1e-9).toLong()
-        val kClipLast = ceil(clip.endBar * 4.0 - offsetBeats - 1e-9).toLong() - 1L
-        val kChunkFirst = floor((startFrame - hitLength) / framesPerBeat - offsetBeats).toLong()
-        val kChunkLast = floor(endFrame / framesPerBeat - offsetBeats).toLong()
+        val kClipFirst = ceil(clip.startBar * 4.0 / spacing - offsetHits - 1e-9).toLong()
+        val kClipLast = ceil(clip.endBar * 4.0 / spacing - offsetHits - 1e-9).toLong() - 1L
+        val kChunkFirst = floor((startFrame - hitLength) / framesPerHit - offsetHits).toLong()
+        val kChunkLast = floor(endFrame / framesPerHit - offsetHits).toLong()
 
         var k = maxOf(kClipFirst, kChunkFirst)
         val kEnd = minOf(kClipLast, kChunkLast)
         while (k <= kEnd) {
-            val hitStart = ((k + offsetBeats) * framesPerBeat).toLong()
+            val hitStart = ((k + offsetHits) * framesPerHit).toLong()
             val from = maxOf(startFrame, hitStart)
             val to = minOf(endFrame, hitStart + hitLength)
             if (from < to) {
