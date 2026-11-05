@@ -4,34 +4,35 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- zackige Wellenlinie hinter den Kopfhörern (auf Höhe der Kopfhörer-Kreise) -->
+    <!-- dünne, wellenartige Linie hinter den Kopfhörern -->
     <path
         android:strokeColor="#FFFFFF"
-        android:strokeWidth="3"
+        android:strokeWidth="1.4"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:pathData="M16,48L23,36L30,60L37,36L44,60L51,36L58,60L65,36L72,60L79,36L86,60L92,48" />
+        android:pathData="M12,46Q16,40 20,46Q24,54 28,46Q33,32 38,46Q43,60 48,46Q52,38 56,46Q61,57 66,46Q70,36 74,46Q78,52 82,46Q86,43 90,46Q93,48 96,46" />
 
-    <!-- linker Ohrhörer -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M30,48a10,10 0 1,0 20,0a10,10 0 1,0 -20,0" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M36,54L44,54L44,72Q44,76 40,76Q36,76 36,72Z" />
-
-    <!-- rechter Ohrhörer -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M58,48a10,10 0 1,0 20,0a10,10 0 1,0 -20,0" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M64,54L72,54L72,72Q72,76 68,76Q64,76 64,72Z" />
-
-    <!-- Kabel -->
-    <path
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="2.5"
-        android:strokeLineCap="round"
-        android:pathData="M40,76Q54,92 68,76" />
+    <group
+        android:scaleX="1.3"
+        android:scaleY="1.3"
+        android:pivotX="54"
+        android:pivotY="54">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M30,48a10,10 0 1,0 20,0a10,10 0 1,0 -20,0" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M36,54L44,54L44,72Q44,76 40,76Q36,76 36,72Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M58,48a10,10 0 1,0 20,0a10,10 0 1,0 -20,0" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M64,54L72,54L72,72Q72,76 68,76Q64,76 64,72Z" />
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.5"
+            android:strokeLineCap="round"
+            android:pathData="M40,76Q54,86 68,76" />
+    </group>
 </vector>
