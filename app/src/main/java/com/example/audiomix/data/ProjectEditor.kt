@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.util.UUID
 import kotlin.math.abs
+import kotlin.math.floor
 
 class ProjectEditor(
     initial: Project,
@@ -14,7 +15,6 @@ class ProjectEditor(
     var project by mutableStateOf(initial)
         private set
 
-    /** Alle ausgewählten Zeilen (leer, eine oder mehrere). */
     var selectedTrackIds by mutableStateOf<List<String>>(emptyList())
         private set
 
@@ -38,6 +38,13 @@ class ProjectEditor(
     val tracks: List<Track> get() = project.tracks
 
     fun endBar(): Double = tracks.flatMap { it.clips }.maxOfOrNull { it.endBar } ?: 0.0
+
+    /** Die einzeln ausgewählte Zeile samt ausgewähltem Block. */
+    fun selectedBlock(): Pair<Track, Clip>? {
+        val t = tracks.firstOrNull { it.id == selectedTrackId } ?: return null
+        val c = t.clips.firstOrNull { it.id == selectedClipId } ?: return null
+        return Pair(t, c)
+    }
 
     // ---------- Auswahl ----------
 
@@ -76,17 +83,11 @@ class ProjectEditor(
         update(project.copy(name = name))
     }
 
-    /** Leerer Name setzt den Standardnamen "Musikzeile N" wieder ein. */
     fun renameTrack(trackId: String, newName: String) {
         val name = newName.trim().ifBlank { null }
-        update(
-            project.copy(
-                tracks = tracks.map { if (it.id == trackId) it.copy(name = name) else it }
-            )
-        )
+        update(project.copy(tracks = tracks.map { if (it.id == trackId) it.copy(name = name) else it }))
     }
 
-    /** Schaltet alle ausgewählten Zeilen stumm (oder wieder laut, wenn alle schon stumm sind). */
     fun toggleMute() {
         val selected = tracks.filter { it.id in selectedTrackIds }
         if (selected.isEmpty()) return
@@ -98,7 +99,6 @@ class ProjectEditor(
         )
     }
 
-    /** Setzt die Lautstärke (0 bis 200 Prozent) aller ausgewählten Zeilen. */
     fun setVolume(percent: Int) {
         val p = percent.coerceIn(0, 200)
         update(
@@ -110,11 +110,6 @@ class ProjectEditor(
 
     // ---------- Tempo ----------
 
-    /**
-     * Setzt das Projekt-Tempo. Die Zeilen in [changedRowIds] bekommen das neue Tempo,
-     * alle anderen Audiozeilen behalten ihr eigenes (ihre Blöcke werden in Takten umgerechnet).
-     * Die gedehnten Audio-Dateien müssen vorher bereitliegen.
-     */
     fun applyProjectBpm(newBpm: Int, changedRowIds: Set<String>) {
         val p = project.bpm.toDouble()
         val p2 = newBpm.toDouble()
@@ -131,21 +126,13 @@ class ProjectEditor(
         undoStack.clear()
         redoStack.clear()
         refreshFlags()
-        update(
-            project.copy(
-                bpm = newBpm,
-                tracks = newTracks,
-                durationMs = durationFor(newTracks, newBpm)
-            )
-        )
+        update(project.copy(bpm = newBpm, tracks = newTracks, durationMs = durationFor(newTracks, newBpm)))
     }
 
-    /** Setzt das Tempo einer einzelnen Audiozeile (die gedehnten Dateien liegen vorher bereit). */
     fun applyRowBpm(trackId: String, newBpm: Double) {
         val newTracks = tracks.map { t ->
             if (t.id == trackId && t.type == TrackType.AUDIO) {
-                val r = t.tempo(project.bpm)
-                val factor = r / newBpm
+                val factor = t.tempo(project.bpm) / newBpm
                 t.copy(bpm = newBpm, clips = rescale(t.clips, factor))
             } else {
                 t
@@ -154,34 +141,19 @@ class ProjectEditor(
         undoStack.clear()
         redoStack.clear()
         refreshFlags()
-        update(
-            project.copy(
-                tracks = newTracks,
-                durationMs = durationFor(newTracks, project.bpm)
-            )
-        )
+        update(project.copy(tracks = newTracks, durationMs = durationFor(newTracks, project.bpm)))
     }
 
     // ---------- Blöcke und Zeilen ----------
 
     fun addDrumClip() {
-        insertClip(
-            TrackType.DRUM,
-            Clip(id = UUID.randomUUID().toString(), startBar = cursorBar, lengthBar = 1.0)
-        )
+        insertClip(TrackType.DRUM, Clip(UUID.randomUUID().toString(), cursorBar, 1.0))
     }
 
     fun addHihatClip() {
-        insertClip(
-            TrackType.HIHAT,
-            Clip(id = UUID.randomUUID().toString(), startBar = cursorBar, lengthBar = 1.0)
-        )
+        insertClip(TrackType.HIHAT, Clip(UUID.randomUUID().toString(), cursorBar, 1.0))
     }
 
-    /**
-     * Fügt eine MP3 ein. [rowBpm] ist das Tempo, in dem sie klingt, [sourceBpm] das Tempo der Datei.
-     * Bei [joinSelectedRow] kommt sie in die ausgewählte Audiozeile, sonst in eine neue Zeile.
-     */
     fun addAudioClip(
         fileName: String,
         durationSec: Double,
@@ -195,41 +167,29 @@ class ProjectEditor(
             id = UUID.randomUUID().toString(),
             startBar = startBar,
             lengthBar = lengthBar,
-            offsetBar = 0.0,
             sourceFile = fileName,
             sourceLengthBar = lengthBar,
             sourceBpm = sourceBpm
         )
         val selected = tracks.firstOrNull { it.id == selectedTrackId }
         val newTracks = if (joinSelectedRow && selected != null && selected.type == TrackType.AUDIO) {
-            tracks.map {
-                if (it.id == selected.id) it.copy(clips = overwrite(it.clips, clip)) else it
-            }
+            tracks.map { if (it.id == selected.id) it.copy(clips = overwrite(it.clips, clip)) else it }
         } else {
-            tracks + Track(
-                id = UUID.randomUUID().toString(),
-                type = TrackType.AUDIO,
-                clips = listOf(clip),
-                bpm = rowBpm
-            )
+            tracks + Track(UUID.randomUUID().toString(), TrackType.AUDIO, listOf(clip), bpm = rowBpm)
         }
         commitTracks(newTracks)
     }
 
-    /** Fügt einen Clip in die ausgewählte Zeile (gleiche Audioart) oder in eine neue Zeile ein. */
     fun insertClip(type: TrackType, clip: Clip) {
         val selected = tracks.firstOrNull { it.id == selectedTrackId }
         val newTracks = if (selected != null && selected.type == type) {
-            tracks.map {
-                if (it.id == selected.id) it.copy(clips = overwrite(it.clips, clip)) else it
-            }
+            tracks.map { if (it.id == selected.id) it.copy(clips = overwrite(it.clips, clip)) else it }
         } else {
             tracks + Track(UUID.randomUUID().toString(), type, listOf(clip))
         }
         commitTracks(newTracks)
     }
 
-    /** Ersetzt einen vorhandenen Clip (gekürzt, verlängert oder verschoben). */
     fun replaceClip(trackId: String, newClip: Clip) {
         val newTracks = tracks.map { t ->
             if (t.id == trackId) {
@@ -242,7 +202,81 @@ class ProjectEditor(
         commitTracks(newTracks)
     }
 
-    /** Kopiert eine Zeile exakt in die Zeile darunter (nicht mit dem Original verknüpft). */
+    /** Hängt an den Block genau eine weitere volle Wiederholung an. */
+    fun addRepeat(trackId: String, clipId: String) {
+        val clip = tracks.firstOrNull { it.id == trackId }?.clips?.firstOrNull { it.id == clipId } ?: return
+        replaceClip(trackId, clip.copy(repeats = floor(clip.repeats + 1e-6) + 1.0))
+    }
+
+    /** Teilt den ausgewählten Block am Cursor. Gibt eine Fehlermeldung zurück oder null. */
+    fun splitSelectedClip(): String? {
+        val (track, clip) = selectedBlock() ?: return "Erst einen Block auswählen"
+        val tiles = clip.tiles(true)
+        val cursor = cursorBar
+        val target = tiles.firstOrNull { cursor > it.startBar + 1e-6 && cursor < it.endBar - 1e-6 }
+            ?: return "Der Cursor muss im ausgewählten Block stehen"
+        val left = target.copy(lengthBar = cursor - target.startBar)
+        val right = target.copy(
+            id = UUID.randomUUID().toString(),
+            startBar = cursor,
+            lengthBar = target.endBar - cursor,
+            offsetBar = target.offsetBar + (cursor - target.startBar)
+        )
+        val parts = tiles.flatMap { if (it.id == target.id) listOf(left, right) else listOf(it) }
+        commitTracks(
+            tracks.map { t ->
+                if (t.id == track.id) {
+                    t.copy(clips = (t.clips.filter { it.id != clip.id } + parts).sortedBy { it.startBar })
+                } else {
+                    t
+                }
+            }
+        )
+        selectedClipId = left.id
+        return null
+    }
+
+    fun toggleClipMute() {
+        val (track, clip) = selectedBlock() ?: return
+        commitTracks(
+            tracks.map { t ->
+                if (t.id == track.id) {
+                    t.copy(clips = t.clips.map { if (it.id == clip.id) it.copy(muted = !it.muted) else it })
+                } else {
+                    t
+                }
+            }
+        )
+    }
+
+    /** Fügt den kopierten Block am Cursor ein (die Audiodatei muss schon im Projekt liegen). */
+    fun pasteClip(entry: ClipboardEntry) {
+        val isAudio = entry.type == TrackType.AUDIO
+        val scale = if (isAudio) project.bpm.toDouble() / entry.projectBpm else 1.0
+        val c = entry.clip
+        val clip = c.copy(
+            id = UUID.randomUUID().toString(),
+            startBar = cursorBar,
+            lengthBar = c.lengthBar * scale,
+            offsetBar = c.offsetBar * scale,
+            sourceLengthBar = c.sourceLengthBar * scale
+        )
+        val selected = tracks.firstOrNull { it.id == selectedTrackId }
+        val join = selected != null && selected.type == entry.type &&
+            (!isAudio || abs(selected.tempo(project.bpm) - entry.trackTempo) < 0.0005)
+        val newTracks = if (join && selected != null) {
+            tracks.map { if (it.id == selected.id) it.copy(clips = overwrite(it.clips, clip)) else it }
+        } else {
+            tracks + Track(
+                UUID.randomUUID().toString(),
+                entry.type,
+                listOf(clip),
+                bpm = if (isAudio) entry.trackTempo else 0.0
+            )
+        }
+        commitTracks(newTracks)
+    }
+
     fun duplicateTrack(trackId: String) {
         val index = tracks.indexOfFirst { it.id == trackId }
         if (index < 0) return
@@ -256,7 +290,7 @@ class ProjectEditor(
         commitTracks(newTracks)
     }
 
-    /** Löscht den ausgewählten Clip (bei einer Zeile), sonst alle ausgewählten Zeilen. */
+    /** Löscht den ausgewählten Block (bei einer Zeile), sonst alle ausgewählten Zeilen. */
     fun deleteSelection() {
         val ids = selectedTrackIds
         if (ids.isEmpty()) return
@@ -293,15 +327,10 @@ class ProjectEditor(
 
     // ---------- intern ----------
 
-    /** Beim Rückgängig-Machen bleiben Name, Stumm und Lautstärke der Zeilen, wie sie gerade sind. */
     private fun withCurrentMeta(snapshot: List<Track>): List<Track> =
         snapshot.map { s ->
             val current = tracks.firstOrNull { it.id == s.id }
-            if (current != null) {
-                s.copy(name = current.name, muted = current.muted, volume = current.volume)
-            } else {
-                s
-            }
+            if (current != null) s.copy(name = current.name, muted = current.muted, volume = current.volume) else s
         }
 
     private fun durationFor(list: List<Track>, bpm: Int): Long {
@@ -309,7 +338,6 @@ class ProjectEditor(
         return (end * 4.0 * 60_000.0 / bpm).toLong()
     }
 
-    /** Rechnet Längen und Versatz um; Überlappungen werden vom späteren Block überschrieben. */
     private fun rescale(clips: List<Clip>, factor: Double): List<Clip> {
         if (abs(factor - 1.0) < 1e-9) return clips
         var result: List<Clip> = emptyList()
@@ -324,27 +352,36 @@ class ProjectEditor(
         return result
     }
 
+    /** Legt den Block in die Zeile; was darunter liegt, wird zugeschnitten oder entfernt. */
     private fun overwrite(clips: List<Clip>, newClip: Clip): List<Clip> {
         val s = newClip.startBar
         val e = newClip.endBar
         val result = ArrayList<Clip>()
-        for (c in clips) {
-            if (c.endBar <= s || c.startBar >= e) {
-                result.add(c)
+        for (original in clips) {
+            if (original.endBar <= s || original.startBar >= e) {
+                result.add(original)
                 continue
             }
-            if (c.startBar < s) {
-                result.add(c.copy(lengthBar = s - c.startBar))
-            }
-            if (c.endBar > e) {
-                result.add(
-                    c.copy(
-                        id = if (c.startBar < s) UUID.randomUUID().toString() else c.id,
-                        startBar = e,
-                        lengthBar = c.endBar - e,
-                        offsetBar = c.offsetBar + (e - c.startBar)
+            // überschriebene Wiederholungen werden zu einzelnen Blöcken
+            val parts = if (original.repeats > 1e-9) original.tiles(true) else listOf(original)
+            for (c in parts) {
+                if (c.endBar <= s || c.startBar >= e) {
+                    result.add(c)
+                    continue
+                }
+                if (c.startBar < s) {
+                    result.add(c.copy(lengthBar = s - c.startBar))
+                }
+                if (c.endBar > e) {
+                    result.add(
+                        c.copy(
+                            id = if (c.startBar < s) UUID.randomUUID().toString() else c.id,
+                            startBar = e,
+                            lengthBar = c.endBar - e,
+                            offsetBar = c.offsetBar + (e - c.startBar)
+                        )
                     )
-                )
+                }
             }
         }
         result.add(newClip)
@@ -376,9 +413,7 @@ class ProjectEditor(
             selectedClipId = null
         } else {
             val track = tracks.firstOrNull { it.id == single }
-            if (track == null || track.clips.none { it.id == selectedClipId }) {
-                selectedClipId = null
-            }
+            if (track == null || track.clips.none { it.id == selectedClipId }) selectedClipId = null
         }
     }
 
