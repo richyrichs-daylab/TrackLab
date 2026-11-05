@@ -50,7 +50,7 @@ object Backup {
                 for (dir in audioRoot.listFiles { f -> f.isDirectory }.orEmpty()) {
                     if (!File(projectsDir, "${dir.name}.json").exists()) continue
                     for (file in dir.listFiles().orEmpty()) {
-                        if (file.isFile && (file.extension == "mp3" || file.extension == "peaks")) {
+                                                if (file.isFile && file.extension != "pcm" && file.extension != "tmp") {
                             addFile(zip, "audio/${dir.name}/${file.name}", file)
                         }
                     }
