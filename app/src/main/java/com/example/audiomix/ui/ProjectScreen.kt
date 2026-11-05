@@ -8,6 +8,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -62,11 +63,16 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.audiomix.R
 import com.example.audiomix.data.AudioFiles
 import com.example.audiomix.data.AudioImport
+import com.example.audiomix.data.BlockClipboard
+import com.example.audiomix.data.Clip
+import com.example.audiomix.data.ClipboardEntry
+import com.example.audiomix.data.ExportFormat
 import com.example.audiomix.data.Exporter
 import com.example.audiomix.data.MixPlayer
 import com.example.audiomix.data.MixRenderer
@@ -88,6 +94,8 @@ import kotlinx.coroutines.withContext
 fun ProjectScreen(
     project: Project,
     onSave: (Project) -> Unit,
+    exportFormat: ExportFormat,
+    onExportFormatChange: (ExportFormat) -> Unit,
     onClose: () -> Unit
 ) {
     val colors = LocalAppColors.current
@@ -96,18 +104,16 @@ fun ProjectScreen(
     val scope = rememberCoroutineScope()
 
     val editor = remember(project.id) { ProjectEditor(project, onSave) }
-    val timeline = remember { TimelineState(with(density) { 66.dp.toPx() }) }
+    val timeline = remember { TimelineState(with(density) { 66.dp.toPx() }, density) }
     val peaks = remember(project.id) { mutableStateMapOf<String, ByteArray>() }
     val player = remember { MixPlayer() }
 
-    // Alle ausgewählten Zeilen (mit ihrer Position)
     val selectedRows = editor.tracks.withIndex().filter { it.value.id in editor.selectedTrackIds }
+    val selectedBlock = editor.selectedBlock()
 
     var editingName by remember { mutableStateOf(false) }
     var nameText by remember(editingName) {
-        mutableStateOf(
-            TextFieldValue(editor.project.name, TextRange(editor.project.name.length))
-        )
+        mutableStateOf(TextFieldValue(editor.project.name, TextRange(editor.project.name.length)))
     }
     val focus = remember { FocusRequester() }
     LaunchedEffect(editingName) { if (editingName) focus.requestFocus() }
@@ -124,23 +130,28 @@ fun ProjectScreen(
     var playing by remember { mutableStateOf(false) }
     var restartKey by remember { mutableIntStateOf(0) }
     var plusMenu by remember { mutableStateOf(false) }
+    var formatMenu by remember { mutableStateOf(false) }
     var pendingBar by remember { mutableDoubleStateOf(0.0) }
     var volumeOpen by remember { mutableStateOf(false) }
 
-    // Ohne ausgewählte Zeile gibt es keine Lautstärke-Zeile
     LaunchedEffect(selectedRows.isEmpty()) {
         if (selectedRows.isEmpty()) volumeOpen = false
     }
 
-    // Stumm- und Lautstärke-Änderungen sollen auch während des Abspielens sofort wirken
-    val mixKey = editor.tracks.map { Pair(it.muted, it.volume) }
+    // Dehnen-Modus endet, wenn sich die Auswahl ändert
+    LaunchedEffect(editor.selectedClipId, editor.selectedTrackIds) {
+        if (timeline.stretchMode) {
+            timeline.stretchMode = false
+            timeline.ghostClip = null
+            timeline.ghostTrackId = null
+        }
+    }
 
-    /** Fortschritt in Prozent, solange gearbeitet wird (null = nichts los). */
+    // Stumm, Lautstärke und Block-Stumm wirken auch während des Abspielens
+    val mixKey = editor.tracks.map { t -> Triple(t.muted, t.volume, t.clips.map { it.muted }) }
+
     var busyPercent by remember { mutableStateOf<Int?>(null) }
-
-    /** Neues Projekt-Tempo, zu dem gerade noch eine Rückfrage offen ist. */
     var bpmQuestion by remember { mutableStateOf<Int?>(null) }
-
     var pendingImport by remember { mutableStateOf<AudioImport.Imported?>(null) }
     var importTempoText by remember { mutableStateOf("") }
     var importTarget by remember { mutableDoubleStateOf(100.0) }
@@ -152,21 +163,25 @@ fun ProjectScreen(
     fun speedRangeOk(targetBpm: Double, sourceBpm: Double): Boolean =
         targetBpm / sourceBpm in 0.25..4.0
 
-    /** Räumt gedehnte Dateien weg, die nicht mehr gebraucht werden. */
+    /** Welche Tempi für diese Audio-Blöcke möglich sind (Faktor 4 in beide Richtungen). */
+    fun tempoRange(clips: List<Clip>): Pair<Double, Double> = Pair(
+        clips.maxOf { it.sourceBpm * 0.25 / it.stretch },
+        clips.minOf { it.sourceBpm * 4.0 / it.stretch }
+    )
+
     fun cleanupStretched() {
         val projectBpm = editor.project.bpm
         val keep = editor.tracks
             .filter { it.type == TrackType.AUDIO }
             .flatMap { t ->
                 t.clips.mapNotNull { c ->
-                    c.sourceFile?.let { StretchFiles.fileNameFor(it, t.tempo(projectBpm) / c.sourceBpm) }
+                    c.sourceFile?.let { StretchFiles.fileNameFor(it, c.speed(t.tempo(projectBpm))) }
                 }
             }
             .toSet()
         scope.launch(Dispatchers.IO) { StretchFiles.cleanup(context, project.id, keep) }
     }
 
-    /** Erzeugt die gedehnten Dateien (mit Lade-Overlay) und führt danach [onSuccess] aus. */
     fun runStretchJob(needed: List<Pair<String, Double>>, onSuccess: () -> Unit) {
         busyPercent = 0
         scope.launch {
@@ -206,15 +221,13 @@ fun ProjectScreen(
         val projectBpm = editor.project.bpm
         val p = projectBpm.toDouble()
         val changed = editor.tracks.filter {
-            it.type == TrackType.AUDIO &&
-                (includeDiffering || abs(it.tempo(projectBpm) - p) < 0.0005)
+            it.type == TrackType.AUDIO && (includeDiffering || abs(it.tempo(projectBpm) - p) < 0.0005)
         }
         val changedIds = changed.map { it.id }.toSet()
         val clips = changed.flatMap { it.clips }.filter { it.sourceFile != null }
 
         if (clips.isNotEmpty()) {
-            val lo = clips.maxOf { it.sourceBpm * 0.25 }
-            val hi = clips.minOf { it.sourceBpm * 4.0 }
+            val (lo, hi) = tempoRange(clips)
             if (newBpm < lo || newBpm > hi) {
                 val low = maxOf(6, ceil(lo).toInt())
                 val high = minOf(400, floor(hi).toInt())
@@ -226,9 +239,8 @@ fun ProjectScreen(
                 return
             }
         }
-
         val needed = clips
-            .map { Pair(it.sourceFile!!, newBpm / it.sourceBpm) }
+            .map { Pair(it.sourceFile!!, newBpm / it.sourceBpm * it.stretch) }
             .distinctBy { "${it.first}|${StretchFiles.key(it.second)}" }
 
         if (needed.isEmpty()) {
@@ -246,11 +258,7 @@ fun ProjectScreen(
         val hasDiffering = editor.tracks.any {
             it.type == TrackType.AUDIO && abs(it.tempo(projectBpm) - p) > 0.0005
         }
-        if (hasDiffering) {
-            bpmQuestion = newBpm
-        } else {
-            runBpmChange(newBpm, false)
-        }
+        if (hasDiffering) bpmQuestion = newBpm else runBpmChange(newBpm, false)
     }
 
     fun commitBpmField() {
@@ -263,7 +271,6 @@ fun ProjectScreen(
         startBpmChange(value)
     }
 
-    // ---- BPM einer einzelnen Zeile ändern ----
     fun commitRowBpm(trackId: String, text: String) {
         val typed = text.replace(',', '.').toDoubleOrNull() ?: return
         val value = typed.coerceIn(6.0, 400.0)
@@ -273,23 +280,17 @@ fun ProjectScreen(
 
         val clips = track.clips.filter { it.sourceFile != null }
         if (clips.isNotEmpty()) {
-            val lo = clips.maxOf { it.sourceBpm * 0.25 }
-            val hi = clips.minOf { it.sourceBpm * 4.0 }
+            val (lo, hi) = tempoRange(clips)
             if (value < lo || value > hi) {
                 val low = maxOf(6, ceil(lo).toInt())
                 val high = minOf(400, floor(hi).toInt())
-                Toast.makeText(
-                    context,
-                    "Für diese Zeile sind nur $low–$high bpm möglich",
-                    Toast.LENGTH_LONG
-                ).show()
+                Toast.makeText(context, "Für diese Zeile sind nur $low–$high bpm möglich", Toast.LENGTH_LONG).show()
                 return
             }
         }
         val needed = clips
-            .map { Pair(it.sourceFile!!, value / it.sourceBpm) }
+            .map { Pair(it.sourceFile!!, value / it.sourceBpm * it.stretch) }
             .distinctBy { "${it.first}|${StretchFiles.key(it.second)}" }
-
         if (needed.isEmpty()) {
             editor.applyRowBpm(trackId, value)
             cleanupStretched()
@@ -298,7 +299,7 @@ fun ProjectScreen(
         runStretchJob(needed) { editor.applyRowBpm(trackId, value) }
     }
 
-    // ---- MP3 importieren (nach der Tempo-Frage) ----
+    // ---- Audio importieren (nach der Tempo-Frage) ----
     fun confirmImport(imported: AudioImport.Imported, adapt: Boolean) {
         val projectBpm = editor.project.bpm
         val selected = editor.tracks.firstOrNull {
@@ -309,7 +310,6 @@ fun ProjectScreen(
             Toast.makeText(context, "Bitte ein Tempo zwischen 6 und 400 eingeben", Toast.LENGTH_SHORT).show()
             return
         }
-
         val rowBpm: Double
         val join: Boolean
         if (adapt) {
@@ -343,18 +343,17 @@ fun ProjectScreen(
         }
     }
 
-    // Dateien-App für den MP3-Import
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
             scope.launch {
-                Toast.makeText(context, "MP3 wird importiert …", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Datei wird importiert …", Toast.LENGTH_SHORT).show()
                 val imported = withContext(Dispatchers.IO) {
-                    AudioImport.importMp3(context, uri, project.id)
+                    AudioImport.importAudio(context, uri, project.id)
                 }
                 if (imported == null) {
                     Toast.makeText(
                         context,
-                        "Diese Datei konnte nicht gelesen werden (nur MP3 möglich)",
+                        "Diese Datei konnte nicht gelesen werden (MP3, WAV und Opus gehen)",
                         Toast.LENGTH_LONG
                     ).show()
                 } else {
@@ -369,7 +368,78 @@ fun ProjectScreen(
         }
     }
 
-    // Wellenform-Daten der Audio-Clips laden
+    // ---- Block-Werkzeuge ----
+    fun copyBlock(cut: Boolean) {
+        val (track, clip) = editor.selectedBlock() ?: return
+        val tempo = track.tempo(editor.project.bpm)
+        val pBpm = editor.project.bpm
+        val type = track.type
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                BlockClipboard.store(context, project.id, type, clip, tempo, pBpm)
+            }
+            if (cut) editor.deleteSelection()
+            Toast.makeText(context, if (cut) "Ausgeschnitten" else "Kopiert", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun pasteBlock(entry: ClipboardEntry) {
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                BlockClipboard.restoreFiles(context, project.id, entry.clip)
+            }
+            if (!ok) {
+                Toast.makeText(context, "Die kopierte Audiodatei fehlt", Toast.LENGTH_LONG).show()
+            } else {
+                editor.pasteClip(entry)
+            }
+        }
+    }
+
+    fun cancelStretch() {
+        timeline.stretchMode = false
+        timeline.ghostClip = null
+        timeline.ghostTrackId = null
+    }
+
+    fun confirmStretch() {
+        val ghost = timeline.ghostClip
+        val track = editor.tracks.firstOrNull { it.id == timeline.ghostTrackId }
+        val original = track?.clips?.firstOrNull { it.id == ghost?.id }
+        cancelStretch()
+        if (ghost == null || track == null || original == null || ghost == original) return
+        val file = ghost.sourceFile
+        if (track.type == TrackType.AUDIO && file != null) {
+            val speed = ghost.speed(track.tempo(editor.project.bpm))
+            if (speed < 0.25 || speed > 4.0) {
+                Toast.makeText(context, "So stark lässt sich der Block nicht dehnen (höchstens Faktor 4)", Toast.LENGTH_LONG).show()
+                return
+            }
+            playing = false
+            runStretchJob(listOf(Pair(file, speed))) { editor.replaceClip(track.id, ghost) }
+        } else {
+            editor.replaceClip(track.id, ghost)
+        }
+    }
+
+    fun runExport(snapshot: Project) {
+        if (exportFormat == ExportFormat.MP3) {
+            Toast.makeText(context, "MP3-Export folgt in der nächsten Etappe. Bitte WAV oder Opus wählen.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (editor.endBar() <= 0.0) {
+            Toast.makeText(context, "Noch kein Audio vorhanden", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Toast.makeText(context, "Export läuft …", Toast.LENGTH_SHORT).show()
+        scope.launch {
+            val name = withContext(Dispatchers.IO) { Exporter.export(context, snapshot, exportFormat) }
+            val message = if (name != null) "Gespeichert in Downloads: $name" else "Export fehlgeschlagen"
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // Wellenform-Daten laden
     LaunchedEffect(editor.project.tracks) {
         val needed = editor.tracks
             .flatMap { it.clips }
@@ -377,9 +447,7 @@ fun ProjectScreen(
             .distinct()
             .filter { it !in peaks }
         for (name in needed) {
-            val data = withContext(Dispatchers.IO) {
-                AudioFiles.loadPeaks(context, project.id, name)
-            }
+            val data = withContext(Dispatchers.IO) { AudioFiles.loadPeaks(context, project.id, name) }
             if (data != null) peaks[name] = data
         }
     }
@@ -401,7 +469,6 @@ fun ProjectScreen(
                 while (true) {
                     withFrameNanos { }
                     if (editor.cursorBar != lastSet) {
-                        // Der Nutzer hat den Cursor verschoben: von dort aus neu starten
                         restartKey += 1
                         return@LaunchedEffect
                     }
@@ -433,14 +500,14 @@ fun ProjectScreen(
             .background(colors.background)
             .systemBarsPadding()
     ) {
-        // ---- Titelzeile (bleibt auch während des Ladens bedienbar) ----
+        // ---- Titelzeile ----
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(start = 16.dp, end = 8.dp, top = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            Box(modifier = Modifier.weight(1f).padding(end = 8.dp), contentAlignment = Alignment.Center) {
                 if (editingName) {
                     BasicTextField(
                         value = nameText,
@@ -448,7 +515,7 @@ fun ProjectScreen(
                         singleLine = true,
                         textStyle = TextStyle(
                             color = colors.onBackground,
-                            fontSize = 28.sp,
+                            fontSize = 20.sp,
                             fontWeight = FontWeight.Black,
                             textAlign = TextAlign.Center
                         ),
@@ -458,17 +525,18 @@ fun ProjectScreen(
                             editingName = false
                             editor.rename(nameText.text)
                         }),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(focus)
+                        modifier = Modifier.fillMaxWidth().focusRequester(focus)
                     )
                 } else {
                     Text(
                         text = editor.project.name,
                         color = colors.onBackground,
-                        fontSize = 28.sp,
+                        fontSize = 20.sp,
+                        lineHeight = 24.sp,
                         fontWeight = FontWeight.Black,
                         textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.combinedClickable(
                             onClick = {},
                             onLongClick = { editingName = true }
@@ -477,37 +545,27 @@ fun ProjectScreen(
                 }
             }
 
-            // Lautstärke-Button
-            Box(
-                modifier = Modifier
-                    .clickable {
-                        if (selectedRows.isEmpty()) {
-                            Toast.makeText(
-                                context,
-                                "Erst eine Musikzeile auswählen",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        } else {
-                            volumeOpen = !volumeOpen
-                        }
+            // Export-Format (dort, wo vorher der Lautsprecher war)
+            Box {
+                PillButton(text = exportFormat.label, onClick = { formatMenu = true })
+                DropdownMenu(expanded = formatMenu, onDismissRequest = { formatMenu = false }) {
+                    ExportFormat.values().filter { it != exportFormat }.forEach { f ->
+                        DropdownMenuItem(
+                            text = { Text(f.label) },
+                            onClick = {
+                                formatMenu = false
+                                onExportFormatChange(f)
+                            }
+                        )
                     }
-                    .padding(8.dp)
-            ) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_speaker),
-                    contentDescription = "Lautstärke",
-                    tint = if (volumeOpen) Color(0xFFE8607A) else colors.onBackground,
-                    modifier = Modifier.size(30.dp)
-                )
+                }
             }
 
             Text(
                 text = "↑",
                 color = colors.onBackground,
                 fontSize = 40.sp,
-                modifier = Modifier
-                    .clickable(onClick = onClose)
-                    .padding(8.dp)
+                modifier = Modifier.clickable(onClick = onClose).padding(8.dp)
             )
         }
 
@@ -573,9 +631,7 @@ fun ProjectScreen(
                                     imeAction = ImeAction.Done
                                 ),
                                 keyboardActions = KeyboardActions(onDone = { commitBpmField() }),
-                                modifier = Modifier
-                                    .width(40.dp)
-                                    .focusRequester(bpmFocus)
+                                modifier = Modifier.width(40.dp).focusRequester(bpmFocus)
                             )
                             Text(
                                 text = " bpm",
@@ -592,26 +648,8 @@ fun ProjectScreen(
                         )
                     }
 
-                    PillButton(
-                        text = "ex.",
-                        onClick = {
-                            if (editor.endBar() <= 0.0) {
-                                Toast.makeText(context, "Noch kein Audio vorhanden", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "Export läuft …", Toast.LENGTH_SHORT).show()
-                                val snapshot = editor.project
-                                scope.launch {
-                                    val name = withContext(Dispatchers.IO) { Exporter.export(context, snapshot) }
-                                    val message = if (name != null) {
-                                        "Gespeichert in Downloads: $name"
-                                    } else {
-                                        "Export fehlgeschlagen"
-                                    }
-                                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-                                }
-                            }
-                        }
-                    )
+                    PillButton(text = "ex.", onClick = { runExport(editor.project) })
+
                     Box {
                         PlaceholderButton(label = "+", size = 44.dp, onClick = { plusMenu = true })
                         DropdownMenu(expanded = plusMenu, onDismissRequest = { plusMenu = false }) {
@@ -620,7 +658,7 @@ fun ProjectScreen(
                                 onClick = {
                                     plusMenu = false
                                     pendingBar = editor.cursorBar
-                                    picker.launch(arrayOf("audio/*"))
+                                    picker.launch(arrayOf("audio/*", "application/ogg"))
                                 }
                             )
                             DropdownMenuItem(
@@ -637,6 +675,15 @@ fun ProjectScreen(
                                     editor.addHihatClip()
                                 }
                             )
+                            val copied = BlockClipboard.entry
+                            DropdownMenuItem(
+                                text = { Text(if (copied != null) "kopierter Block" else "keine Kopie vorhanden") },
+                                enabled = copied != null,
+                                onClick = {
+                                    plusMenu = false
+                                    if (copied != null) pasteBlock(copied)
+                                }
+                            )
                         }
                     }
                 }
@@ -649,32 +696,42 @@ fun ProjectScreen(
                     modifier = Modifier.weight(1f)
                 )
 
-                // ---- Unterer Bereich: Lautstärke, Zeilen-Leiste, Mülleimer, Play/Pause, Stumm ----
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(colors.timelineBg)
-                ) {
+                // ---- Unterer Bereich ----
+                Column(modifier = Modifier.fillMaxWidth().background(colors.timelineBg)) {
                     if (selectedRows.isNotEmpty()) {
+                        val line = Modifier.fillMaxWidth().height(1.dp).background(Color.Gray.copy(alpha = 0.6f))
+
+                        // Block-Werkzeuge (nur bei einem ausgewählten Block)
+                        if (selectedBlock != null) {
+                            BlockToolsBar(
+                                stretchMode = timeline.stretchMode,
+                                clipMuted = selectedBlock.second.muted,
+                                onMute = { editor.toggleClipMute() },
+                                onSplit = {
+                                    val error = editor.splitSelectedClip()
+                                    if (error != null) Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+                                },
+                                onCopy = { copyBlock(false) },
+                                onCut = { copyBlock(true) },
+                                onStretch = { timeline.stretchMode = true },
+                                onStretchCancel = { cancelStretch() },
+                                onStretchConfirm = { confirmStretch() }
+                            )
+                            Box(line)
+                        }
+
+                        // Lautstärke-Regler
                         if (volumeOpen) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(colors.rowBg)
-                            ) {
+                            Box(Modifier.fillMaxWidth().background(colors.rowBg)) {
                                 VolumeSlider(
                                     percent = selectedRows[0].value.volume,
                                     onChange = { editor.setVolume(it) }
                                 )
                             }
-                            // dünne graue Trennlinie
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(1.dp)
-                                    .background(Color.Gray.copy(alpha = 0.6f))
-                            )
+                            Box(line)
                         }
+
+                        // Name/BPM-Zeile oder (bei mehreren Zeilen) schmale Lautstärke-Leiste
                         if (selectedRows.size == 1) {
                             val row = selectedRows[0].value
                             RowInfoBar(
@@ -682,24 +739,49 @@ fun ProjectScreen(
                                 name = row.displayName(selectedRows[0].index),
                                 bpmText = formatBpm(row.tempo(editor.project.bpm)),
                                 bpmEditable = row.type == TrackType.AUDIO,
+                                volumeActive = volumeOpen,
+                                onVolume = { volumeOpen = !volumeOpen },
                                 onRename = { editor.renameTrack(row.id, it) },
                                 onBpmCommit = { commitRowBpm(row.id, it) },
                                 onBpmLocked = {
-                                    Toast.makeText(
-                                        context,
-                                        "Trommeln folgen immer dem Projekt-Tempo",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
+                                    Toast.makeText(context, "Trommeln folgen immer dem Projekt-Tempo", Toast.LENGTH_SHORT).show()
                                 },
                                 onDuplicate = { editor.duplicateTrack(row.id) }
                             )
+                        } else {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(colors.rowBg)
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_speaker),
+                                    contentDescription = "Lautstärke",
+                                    tint = if (volumeOpen) Color(0xFFE8607A) else colors.onBackground,
+                                    modifier = Modifier.size(28.dp).clickable { volumeOpen = !volumeOpen }
+                                )
+                                Text(
+                                    text = "  ${selectedRows.size} Zeilen ausgewählt",
+                                    color = colors.onBackground,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
 
+                    // Papierkorb, Play/Pause, Stummschalten (Tippen auf freie Fläche wählt eine einzelne Zeile ab)
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(150.dp)
+                            .pointerInput(Unit) {
+                                detectTapGestures {
+                                    if (editor.selectedTrackIds.size == 1) editor.clearSelection()
+                                }
+                            }
                     ) {
                         if (selectedRows.isNotEmpty()) {
                             Text(
@@ -711,7 +793,6 @@ fun ProjectScreen(
                                     .clickable { editor.deleteSelection() }
                                     .padding(8.dp)
                             )
-
                             val allMuted = selectedRows.all { it.value.muted }
                             Box(
                                 modifier = Modifier
@@ -740,11 +821,7 @@ fun ProjectScreen(
                                     } else {
                                         val end = editor.endBar()
                                         if (end <= 0.0) {
-                                            Toast.makeText(
-                                                context,
-                                                "Noch kein Audio vorhanden",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
+                                            Toast.makeText(context, "Noch kein Audio vorhanden", Toast.LENGTH_SHORT).show()
                                         } else {
                                             if (editor.cursorBar >= end) editor.cursorBar = 0.0
                                             playing = true
@@ -754,10 +831,7 @@ fun ProjectScreen(
                             contentAlignment = Alignment.Center
                         ) {
                             Box(
-                                modifier = Modifier
-                                    .size(84.dp)
-                                    .clip(CircleShape)
-                                    .background(Color.White),
+                                modifier = Modifier.size(84.dp).clip(CircleShape).background(Color.White),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
@@ -771,7 +845,7 @@ fun ProjectScreen(
                 }
             }
 
-            // ---- Lade-Overlay: blockiert die Bearbeitung, der Zurück-Pfeil oben bleibt aktiv ----
+            // ---- Lade-Overlay ----
             val percent = busyPercent
             if (percent != null) {
                 Box(
@@ -814,8 +888,7 @@ fun ProjectScreen(
     if (question != null) {
         val projectBpm = editor.project.bpm
         val differing = editor.tracks.withIndex().filter {
-            it.value.type == TrackType.AUDIO &&
-                abs(it.value.tempo(projectBpm) - projectBpm) > 0.0005
+            it.value.type == TrackType.AUDIO && abs(it.value.tempo(projectBpm) - projectBpm) > 0.0005
         }
         val questionText = if (differing.size == 1) {
             "Soll die BPM von „${differing[0].value.displayName(differing[0].index)}“ auch geändert werden?"
@@ -841,7 +914,7 @@ fun ProjectScreen(
         )
     }
 
-    // ---- Tempo-Frage nach dem MP3-Import ----
+    // ---- Tempo-Frage nach dem Import ----
     val pending = pendingImport
     if (pending != null) {
         AlertDialog(
