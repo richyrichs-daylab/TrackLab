@@ -3,7 +3,9 @@ package com.example.audiomix.data
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.abs
+import kotlin.math.min
 
 enum class TrackType { AUDIO, DRUM, HIHAT }
 
@@ -15,9 +17,43 @@ data class Clip(
     val sourceFile: String? = null,
     val sourceLengthBar: Double = 0.0,
     /** Tempo der Original-Datei (bpm). */
-    val sourceBpm: Double = 100.0
+    val sourceBpm: Double = 100.0,
+    /** Tempo-Faktor dieses Blocks (1 = wie die Zeile, 2 = doppelt so schnell). */
+    val stretch: Double = 1.0,
+    /** Wiederholungen als Vielfaches der Blocklänge (0 = keine). */
+    val repeats: Double = 0.0,
+    val muted: Boolean = false
 ) {
-    val endBar: Double get() = startBar + lengthBar
+    /** Ende des eigentlichen Blocks (ohne Wiederholungen). */
+    val tileEnd: Double get() = startBar + lengthBar
+
+    /** Ende inklusive aller Wiederholungen. */
+    val endBar: Double get() = startBar + lengthBar * (1.0 + repeats)
+
+    fun speed(trackTempo: Double): Double = trackTempo / sourceBpm * stretch
+
+    /** Der Block und seine Wiederholungen als einzelne Teile. */
+    fun tiles(freshIds: Boolean = false): List<Clip> {
+        if (repeats <= 1e-9) return listOf(copy(repeats = 0.0))
+        val result = ArrayList<Clip>()
+        val end = endBar
+        var i = 0
+        while (true) {
+            val s = startBar + i * lengthBar
+            val len = min(lengthBar, end - s)
+            if (len < 1e-6) break
+            result.add(
+                copy(
+                    id = if (i == 0 || !freshIds) id else UUID.randomUUID().toString(),
+                    startBar = s,
+                    lengthBar = len,
+                    repeats = 0.0
+                )
+            )
+            i++
+        }
+        return result
+    }
 
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
@@ -26,6 +62,9 @@ data class Clip(
         put("offsetBar", offsetBar)
         put("sourceLengthBar", sourceLengthBar)
         put("sourceBpm", sourceBpm)
+        put("stretch", stretch)
+        put("repeats", repeats)
+        put("muted", muted)
         if (sourceFile != null) put("sourceFile", sourceFile)
     }
 
@@ -37,7 +76,10 @@ data class Clip(
             offsetBar = o.optDouble("offsetBar", 0.0),
             sourceFile = if (o.has("sourceFile")) o.getString("sourceFile") else null,
             sourceLengthBar = o.optDouble("sourceLengthBar", 0.0),
-            sourceBpm = o.optDouble("sourceBpm", 100.0)
+            sourceBpm = o.optDouble("sourceBpm", 100.0),
+            stretch = o.optDouble("stretch", 1.0),
+            repeats = o.optDouble("repeats", 0.0),
+            muted = o.optBoolean("muted", false)
         )
     }
 }
@@ -46,15 +88,11 @@ data class Track(
     val id: String,
     val type: TrackType,
     val clips: List<Clip>,
-    /** Eigener Name der Zeile (null = Standardname "Musikzeile N"). */
     val name: String? = null,
-    /** Tempo der Zeile in bpm (nur Audiozeilen; 0 = folgt dem Projekt). */
     val bpm: Double = 0.0,
     val muted: Boolean = false,
-    /** Lautstärke in Prozent (0 bis 200). */
     val volume: Int = 100
 ) {
-    /** Das Tempo, in dem diese Zeile tatsächlich klingt. */
     fun tempo(projectBpm: Int): Double = if (bpm > 0.0) bpm else projectBpm.toDouble()
 
     fun displayName(index: Int): String = name ?: "Musikzeile ${index + 1}"
@@ -89,7 +127,6 @@ data class Track(
     }
 }
 
-/** Zeigt ganze Zahlen ohne Nachkommastelle, sonst mit einer. */
 fun formatBpm(value: Double): String {
     val rounded = Math.round(value)
     return if (abs(value - rounded) < 0.05) {
