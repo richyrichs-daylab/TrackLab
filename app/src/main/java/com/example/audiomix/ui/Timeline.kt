@@ -1,6 +1,7 @@
 package com.example.audiomix.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -27,6 +28,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
@@ -34,18 +36,22 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.audiomix.R
 import com.example.audiomix.data.AudioImport
 import com.example.audiomix.data.Clip
 import com.example.audiomix.data.ProjectEditor
@@ -156,11 +162,29 @@ fun Timeline(
             editor.clearSelection()
             return
         }
-        if (editor.selectedTrackId != track.id) {
+        val ids = editor.selectedTrackIds
+        val isSelected = track.id in ids
+
+        if (long) {
+            // Gedrückthalten: ohne Auswahl wählt es die Zeile, ab zwei gewählten fügt es eine hinzu.
+            // (Bei genau einer gewählten Zeile übernimmt der 2-Sekunden-Timer.)
+            if (ids.isEmpty()) {
+                editor.selectTrack(track.id)
+            } else if (ids.size >= 2 && !isSelected) {
+                editor.addToSelection(track.id)
+            }
+            return
+        }
+
+        // Antippen
+        if (ids.size >= 2) {
+            editor.toggleSelection(track.id)
+            return
+        }
+        if (!isSelected) {
             editor.selectTrack(track.id)
             return
         }
-        if (long) return
         val clip = track.clips.firstOrNull { bar >= it.startBar && bar < it.endBar }
         if (clip != null && editor.selectedClipId != clip.id) {
             editor.selectClip(clip.id)
@@ -174,20 +198,20 @@ fun Timeline(
         if (p.y < rowsTop) return null
         val index = ((p.y - rowsTop) / rowH).toInt()
         val track = editor.tracks.getOrNull(index) ?: return null
+        // Bearbeiten von Blöcken geht nur in einer einzeln ausgewählten Zeile
+        if (track.id != editor.selectedTrackId) return null
         val barPx = state.barPx
         val scroll = state.scrollPx
 
-        if (track.id == editor.selectedTrackId) {
-            val selected = track.clips.firstOrNull { it.id == editor.selectedClipId }
-            if (selected != null) {
-                val left = (selected.startBar * barPx - scroll).toFloat()
-                val right = (selected.endBar * barPx - scroll).toFloat()
-                if (abs(p.x - left) <= grab) {
-                    return DragTarget(MODE_TRIM_START, track.id, track.type, selected)
-                }
-                if (abs(p.x - right) <= grab) {
-                    return DragTarget(MODE_TRIM_END, track.id, track.type, selected)
-                }
+        val selected = track.clips.firstOrNull { it.id == editor.selectedClipId }
+        if (selected != null) {
+            val left = (selected.startBar * barPx - scroll).toFloat()
+            val right = (selected.endBar * barPx - scroll).toFloat()
+            if (abs(p.x - left) <= grab) {
+                return DragTarget(MODE_TRIM_START, track.id, track.type, selected)
+            }
+            if (abs(p.x - right) <= grab) {
+                return DragTarget(MODE_TRIM_END, track.id, track.type, selected)
             }
         }
         val bar = ((p.x + scroll) / barPx).toDouble()
@@ -201,7 +225,7 @@ fun Timeline(
         Column(Modifier.width(HEADER_DP.dp)) {
             Spacer(Modifier.height((HANDLE_DP + RULER_DP).dp))
             tracks.forEach { track ->
-                TrackBadge(track, selected = track.id == editor.selectedTrackId)
+                TrackBadge(track, selected = track.id in editor.selectedTrackIds)
             }
         }
 
@@ -246,7 +270,6 @@ fun Timeline(
                                     false
                                 }
                                 if (cancelled != null) return@awaitEachGesture
-                                editor.selectTrack(target.trackId)
                                 editor.selectClip(target.clip.id)
                             } else {
                                 down.consume()
@@ -271,11 +294,24 @@ fun Timeline(
                             }
                         }
                     }
-                    // 2) Antippen
+                    // 2) Antippen und Gedrückthalten (Zeilen auswählen)
                     .pointerInput(Unit) {
                         val rowsTop = (HANDLE_DP + RULER_DP).dp.toPx()
                         val rowH = ROW_DP.dp.toPx()
                         detectTapGestures(
+                            onPress = { off ->
+                                // Ist genau eine Zeile gewählt, fügt 2 Sekunden Gedrückthalten eine weitere hinzu
+                                if (editor.selectedTrackIds.size == 1 && off.y >= rowsTop) {
+                                    val index = ((off.y - rowsTop) / rowH).toInt()
+                                    val pressed = editor.tracks.getOrNull(index)
+                                    if (pressed != null && pressed.id !in editor.selectedTrackIds) {
+                                        val result = kotlinx.coroutines.withTimeoutOrNull(2000L) {
+                                            tryAwaitRelease()
+                                        }
+                                        if (result == null) editor.addToSelection(pressed.id)
+                                    }
+                                }
+                            },
                             onTap = { off -> regionTap(off, rowsTop, rowH, false) },
                             onLongPress = { off -> regionTap(off, rowsTop, rowH, true) }
                         )
@@ -305,6 +341,7 @@ fun Timeline(
                 val div = state.division(this)
                 val step = barPx / div
                 val currentTracks = editor.tracks
+                val selectedIds = editor.selectedTrackIds
                 val rowsBottom = rowsTop + currentTracks.size * rowH
                 val ghost = state.ghostClip
                 val secondsPerBar = 240.0 / editor.project.bpm
@@ -316,7 +353,7 @@ fun Timeline(
                 }
                 currentTracks.forEachIndexed { r, t ->
                     val y = rowsTop + r * rowH
-                    if (t.id == editor.selectedTrackId) {
+                    if (t.id in selectedIds) {
                         drawRect(
                             colors.onBackground.copy(alpha = 0.10f),
                             Offset(0f, y),
@@ -352,7 +389,7 @@ fun Timeline(
                             1f
                         )
                     }
-                    // Taktzahl nur zeichnen, wenn sie sichtbar ist (sonst stürzt die App ab)
+                    // Taktzahl nur zeichnen, wenn sie sichtbar ist
                     if (isBar && x > -40.dp.toPx() && x < w) {
                         val label = textMeasurer.measure(
                             (i / div + 1).toString(),
@@ -368,13 +405,25 @@ fun Timeline(
                 // Clips
                 currentTracks.forEachIndexed { r, t ->
                     val y = rowsTop + r * rowH
+                    val base = when {
+                        t.muted -> Color(0xFFBDBDBD)
+                        t.type == TrackType.AUDIO -> Color(0xFFE8C14B)
+                        t.type == TrackType.DRUM -> Color(0xFFF2C2FF)
+                        else -> Color(0xFF8AD8FF)
+                    }
+                    val tickColor = when {
+                        t.muted -> Color(0xFF757575)
+                        t.type == TrackType.DRUM -> Color(0xFF8E2C9A)
+                        else -> Color(0xFF2A6FA8)
+                    }
+                    val waveColor = if (t.muted) Color(0xFF757575) else Color(0xFF7A5C10)
+
                     t.clips.forEach { original ->
                         val c = if (ghost != null && ghost.id == original.id) ghost else original
                         val left = (c.startBar * barPx - scroll).toFloat()
                         val width = (c.lengthBar * barPx).toFloat()
                         if (left + width < 0f || left > w) return@forEach
 
-                        val base = if (t.type == TrackType.AUDIO) Color(0xFFE8C14B) else Color(0xFFF5A04A)
                         val color = if (c.id == editor.selectedClipId) lerp(base, Color.Gray, 0.4f) else base
                         val top = y + 6.dp.toPx()
                         val clipH = rowH - 12.dp.toPx()
@@ -385,18 +434,20 @@ fun Timeline(
                             CornerRadius(12.dp.toPx())
                         )
 
-                        if (t.type == TrackType.DRUM) {
+                        if (t.type != TrackType.AUDIO) {
+                            // Schläge: Trommel auf den Zählzeiten, Hitsch genau dazwischen
                             if (barPx / 4f >= 8.dp.toPx()) {
-                                var beat = ceil(c.startBar * 4.0 - 1e-9) / 4.0
-                                while (beat < c.endBar - 1e-9) {
-                                    val hx = (beat * barPx - scroll).toFloat()
+                                val offsetBeat = if (t.type == TrackType.HIHAT) 0.5 else 0.0
+                                var k = ceil(c.startBar * 4.0 - offsetBeat - 1e-9)
+                                while ((k + offsetBeat) / 4.0 < c.endBar - 1e-9) {
+                                    val hx = ((k + offsetBeat) / 4.0 * barPx - scroll).toFloat()
                                     drawRoundRect(
-                                        Color(0xFF7A4A1E),
+                                        tickColor,
                                         Offset(hx - 2.dp.toPx(), y + 24.dp.toPx()),
                                         Size(4.dp.toPx(), rowH - 48.dp.toPx()),
                                         CornerRadius(2.dp.toPx())
                                     )
-                                    beat += 0.25
+                                    k += 1.0
                                 }
                             }
                         } else {
@@ -406,16 +457,17 @@ fun Timeline(
                                 val x0 = maxOf(left, 0f)
                                 val x1 = minOf(left + width, w)
                                 val stepPx = 3.dp.toPx()
+                                val rowTempo = if (t.bpm > 0.0) t.bpm else editor.project.bpm.toDouble()
                                 var x = x0
                                 while (x < x1) {
                                     val barInClip = (x - left) / barPx
-                                    val sec = (c.offsetBar + barInClip) * secondsPerBar * ((if (t.bpm > 0.0) t.bpm else editor.project.bpm.toDouble()) / c.sourceBpm)
+                                    val sec = (c.offsetBar + barInClip) * secondsPerBar * (rowTempo / c.sourceBpm)
                                     val idx = (sec * AudioImport.PEAKS_PER_SECOND).toInt()
                                     if (idx >= 0 && idx < data.size) {
                                         val amp = (data[idx].toInt() and 0xFF) / 255f
                                         val half = maxOf(1.5.dp.toPx(), amp * clipH / 2f * 0.9f)
                                         drawLine(
-                                            Color(0xFF7A5C10),
+                                            waveColor,
                                             Offset(x, cy - half),
                                             Offset(x, cy + half),
                                             2.dp.toPx()
@@ -428,7 +480,7 @@ fun Timeline(
                     }
                 }
 
-                // Halbkreis-Griffe am ausgewählten Clip
+                // Halbkreis-Griffe am ausgewählten Clip (nur bei einer einzelnen gewählten Zeile)
                 val selIndex = currentTracks.indexOfFirst { it.id == editor.selectedTrackId }
                 if (selIndex >= 0 && editor.selectedClipId != null) {
                     val original = currentTracks[selIndex].clips
@@ -548,7 +600,24 @@ private fun DrawScope.drawHandle(cx: Float, cy: Float, radius: Float, leftSide: 
 
 @Composable
 private fun TrackBadge(track: Track, selected: Boolean) {
-    val ring = if (track.type == TrackType.AUDIO) Color(0xFFFFE600) else Color(0xFF5B21B6)
+    val ringColor = when {
+        track.muted -> Color(0xFF9E9E9E)
+        track.type == TrackType.AUDIO -> Color(0xFFFFE600)
+        track.type == TrackType.DRUM -> Color(0xFFA820A8)
+        else -> Color(0xFF00FFF0)
+    }
+    val glowColor = when {
+        track.muted -> Color(0xFFBDBDBD)
+        track.type == TrackType.AUDIO -> Color(0xFFFFE600)
+        track.type == TrackType.DRUM -> Color(0xFFFF8CFF)
+        else -> Color(0xFF4DA3FF)
+    }
+    val grayFilter = if (track.muted) {
+        ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
+    } else {
+        null
+    }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -558,25 +627,46 @@ private fun TrackBadge(track: Track, selected: Boolean) {
         if (selected) {
             Box(
                 Modifier
+                    .size(70.dp)
+                    .clip(CircleShape)
+                    .background(glowColor.copy(alpha = 0.22f))
+            )
+            Box(
+                Modifier
                     .size(62.dp)
                     .clip(CircleShape)
-                    .background(ring.copy(alpha = 0.35f))
+                    .background(glowColor.copy(alpha = 0.45f))
             )
         }
         Box(
             modifier = Modifier
                 .size(50.dp)
                 .clip(CircleShape)
-                .background(ring)
+                .background(ringColor)
                 .padding(4.dp)
                 .clip(CircleShape)
                 .background(Color.White),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = if (track.type == TrackType.AUDIO) "📁" else "🥁",
-                fontSize = 22.sp
-            )
+            when (track.type) {
+                TrackType.AUDIO -> Text(
+                    text = "📁",
+                    fontSize = 22.sp,
+                    modifier = Modifier.alpha(if (track.muted) 0.4f else 1f)
+                )
+                TrackType.DRUM -> Image(
+                    painter = painterResource(R.drawable.ic_drum),
+                    contentDescription = null,
+                    colorFilter = grayFilter,
+                    modifier = Modifier.size(28.dp)
+                )
+                TrackType.HIHAT -> Image(
+                    painter = painterResource(R.drawable.ic_hihat),
+                    contentDescription = null,
+                    colorFilter = grayFilter,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
         }
     }
 }
