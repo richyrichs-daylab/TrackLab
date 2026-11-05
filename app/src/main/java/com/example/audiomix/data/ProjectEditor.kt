@@ -14,10 +14,15 @@ class ProjectEditor(
     var project by mutableStateOf(initial)
         private set
 
-    var selectedTrackId by mutableStateOf<String?>(null)
+    /** Alle ausgewählten Zeilen (leer, eine oder mehrere). */
+    var selectedTrackIds by mutableStateOf<List<String>>(emptyList())
         private set
+
     var selectedClipId by mutableStateOf<String?>(null)
         private set
+
+    /** Die ausgewählte Zeile, aber nur wenn genau eine ausgewählt ist. */
+    val selectedTrackId: String? get() = selectedTrackIds.singleOrNull()
 
     /** Cursorposition in Takten. */
     var cursorBar by mutableDoubleStateOf(0.0)
@@ -37,7 +42,21 @@ class ProjectEditor(
     // ---------- Auswahl ----------
 
     fun selectTrack(id: String) {
-        selectedTrackId = id
+        selectedTrackIds = listOf(id)
+        selectedClipId = null
+    }
+
+    fun addToSelection(id: String) {
+        if (id !in selectedTrackIds) selectedTrackIds = selectedTrackIds + id
+        selectedClipId = null
+    }
+
+    fun toggleSelection(id: String) {
+        selectedTrackIds = if (id in selectedTrackIds) {
+            selectedTrackIds.filter { it != id }
+        } else {
+            selectedTrackIds + id
+        }
         selectedClipId = null
     }
 
@@ -46,11 +65,11 @@ class ProjectEditor(
     }
 
     fun clearSelection() {
-        selectedTrackId = null
+        selectedTrackIds = emptyList()
         selectedClipId = null
     }
 
-    // ---------- Namen ----------
+    // ---------- Namen, Stumm, Lautstärke ----------
 
     fun rename(newName: String) {
         val name = newName.trim().ifBlank { project.name }
@@ -63,6 +82,28 @@ class ProjectEditor(
         update(
             project.copy(
                 tracks = tracks.map { if (it.id == trackId) it.copy(name = name) else it }
+            )
+        )
+    }
+
+    /** Schaltet alle ausgewählten Zeilen stumm (oder wieder laut, wenn alle schon stumm sind). */
+    fun toggleMute() {
+        val selected = tracks.filter { it.id in selectedTrackIds }
+        if (selected.isEmpty()) return
+        val mute = !selected.all { it.muted }
+        update(
+            project.copy(
+                tracks = tracks.map { if (it.id in selectedTrackIds) it.copy(muted = mute) else it }
+            )
+        )
+    }
+
+    /** Setzt die Lautstärke (0 bis 200 Prozent) aller ausgewählten Zeilen. */
+    fun setVolume(percent: Int) {
+        val p = percent.coerceIn(0, 200)
+        update(
+            project.copy(
+                tracks = tracks.map { if (it.id in selectedTrackIds) it.copy(volume = p) else it }
             )
         )
     }
@@ -121,15 +162,20 @@ class ProjectEditor(
         )
     }
 
-    // ---------- Blöcke ----------
+    // ---------- Blöcke und Zeilen ----------
 
     fun addDrumClip() {
-        val clip = Clip(
-            id = UUID.randomUUID().toString(),
-            startBar = cursorBar,
-            lengthBar = 1.0
+        insertClip(
+            TrackType.DRUM,
+            Clip(id = UUID.randomUUID().toString(), startBar = cursorBar, lengthBar = 1.0)
         )
-        insertClip(TrackType.DRUM, clip)
+    }
+
+    fun addHihatClip() {
+        insertClip(
+            TrackType.HIHAT,
+            Clip(id = UUID.randomUUID().toString(), startBar = cursorBar, lengthBar = 1.0)
+        )
     }
 
     /**
@@ -196,11 +242,27 @@ class ProjectEditor(
         commitTracks(newTracks)
     }
 
-    /** Löscht den ausgewählten Clip, sonst die ausgewählte Zeile. */
+    /** Kopiert eine Zeile exakt in die Zeile darunter (nicht mit dem Original verknüpft). */
+    fun duplicateTrack(trackId: String) {
+        val index = tracks.indexOfFirst { it.id == trackId }
+        if (index < 0) return
+        val original = tracks[index]
+        val copy = original.copy(
+            id = UUID.randomUUID().toString(),
+            clips = original.clips.map { it.copy(id = UUID.randomUUID().toString()) }
+        )
+        val newTracks = tracks.toMutableList()
+        newTracks.add(index + 1, copy)
+        commitTracks(newTracks)
+    }
+
+    /** Löscht den ausgewählten Clip (bei einer Zeile), sonst alle ausgewählten Zeilen. */
     fun deleteSelection() {
-        val trackId = selectedTrackId ?: return
+        val ids = selectedTrackIds
+        if (ids.isEmpty()) return
         val clipId = selectedClipId
-        if (clipId != null) {
+        if (ids.size == 1 && clipId != null) {
+            val trackId = ids[0]
             commitTracks(
                 tracks.map {
                     if (it.id == trackId) it.copy(clips = it.clips.filter { c -> c.id != clipId }) else it
@@ -208,7 +270,7 @@ class ProjectEditor(
             )
             selectedClipId = null
         } else {
-            commitTracks(tracks.filter { it.id != trackId })
+            commitTracks(tracks.filter { it.id !in ids })
             clearSelection()
         }
     }
@@ -216,7 +278,7 @@ class ProjectEditor(
     fun undo() {
         if (undoStack.isEmpty()) return
         redoStack.add(project.tracks)
-        applyTracks(withCurrentNames(undoStack.removeAt(undoStack.lastIndex)))
+        applyTracks(withCurrentMeta(undoStack.removeAt(undoStack.lastIndex)))
         fixSelection()
         refreshFlags()
     }
@@ -224,18 +286,22 @@ class ProjectEditor(
     fun redo() {
         if (redoStack.isEmpty()) return
         undoStack.add(project.tracks)
-        applyTracks(withCurrentNames(redoStack.removeAt(redoStack.lastIndex)))
+        applyTracks(withCurrentMeta(redoStack.removeAt(redoStack.lastIndex)))
         fixSelection()
         refreshFlags()
     }
 
     // ---------- intern ----------
 
-    /** Beim Rückgängig-Machen bleiben die aktuellen Zeilennamen erhalten. */
-    private fun withCurrentNames(snapshot: List<Track>): List<Track> =
+    /** Beim Rückgängig-Machen bleiben Name, Stumm und Lautstärke der Zeilen, wie sie gerade sind. */
+    private fun withCurrentMeta(snapshot: List<Track>): List<Track> =
         snapshot.map { s ->
             val current = tracks.firstOrNull { it.id == s.id }
-            if (current != null) s.copy(name = current.name) else s
+            if (current != null) {
+                s.copy(name = current.name, muted = current.muted, volume = current.volume)
+            } else {
+                s
+            }
         }
 
     private fun durationFor(list: List<Track>, bpm: Int): Long {
@@ -303,11 +369,16 @@ class ProjectEditor(
     }
 
     private fun fixSelection() {
-        val track = tracks.firstOrNull { it.id == selectedTrackId }
-        if (track == null) {
-            clearSelection()
-        } else if (track.clips.none { it.id == selectedClipId }) {
+        val existing = tracks.map { it.id }.toSet()
+        selectedTrackIds = selectedTrackIds.filter { it in existing }
+        val single = selectedTrackId
+        if (single == null) {
             selectedClipId = null
+        } else {
+            val track = tracks.firstOrNull { it.id == single }
+            if (track == null || track.clips.none { it.id == selectedClipId }) {
+                selectedClipId = null
+            }
         }
     }
 
