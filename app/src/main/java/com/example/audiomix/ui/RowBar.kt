@@ -44,6 +44,7 @@ fun RowInfoBar(
     onRename: (String) -> Unit,
     onBpmCommit: (String) -> Unit,
     onBpmLocked: () -> Unit,
+    onDuplicate: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val colors = LocalAppColors.current
@@ -67,6 +68,11 @@ fun RowInfoBar(
         fontWeight = FontWeight.Bold
     )
     val dimmedStyle = style.copy(color = colors.onBackground.copy(alpha = 0.55f))
+    val smallStyle = TextStyle(
+        color = colors.onBackground,
+        fontSize = 15.sp,
+        fontWeight = FontWeight.Bold
+    )
 
     Row(
         modifier = modifier
@@ -107,6 +113,18 @@ fun RowInfoBar(
             )
         }
 
+        Spacer(Modifier.width(10.dp))
+
+        // ---- Duplizieren (links neben der BPM) ----
+        Text(
+            text = "Duplizieren",
+            style = smallStyle,
+            maxLines = 1,
+            modifier = Modifier
+                .clickable(onClick = onDuplicate)
+                .padding(vertical = 4.dp)
+        )
+
         Spacer(Modifier.width(12.dp))
 
         // ---- BPM (rechts) ----
@@ -114,6 +132,7 @@ fun RowInfoBar(
             Text(
                 text = "$bpmText bpm",
                 style = dimmedStyle,
+                maxLines = 1,
                 modifier = Modifier.clickable(onClick = onBpmLocked)
             )
         } else if (editingBpm) {
@@ -137,7 +156,7 @@ fun RowInfoBar(
                         onBpmCommit(bpmValue.text)
                     }),
                     modifier = Modifier
-                        .width(72.dp)
+                        .width(64.dp)
                         .focusRequester(bpmFocus)
                 )
                 Text(text = " bpm", style = style)
@@ -146,6 +165,7 @@ fun RowInfoBar(
             Text(
                 text = "$bpmText bpm",
                 style = style,
+                maxLines = 1,
                 modifier = Modifier.combinedClickable(
                     onClick = { editingBpm = true },
                     onLongClick = { editingBpm = true }
