@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 import kotlin.math.abs
 
-enum class TrackType { AUDIO, DRUM }
+enum class TrackType { AUDIO, DRUM, HIHAT }
 
 data class Clip(
     val id: String,
@@ -49,7 +49,10 @@ data class Track(
     /** Eigener Name der Zeile (null = Standardname "Musikzeile N"). */
     val name: String? = null,
     /** Tempo der Zeile in bpm (nur Audiozeilen; 0 = folgt dem Projekt). */
-    val bpm: Double = 0.0
+    val bpm: Double = 0.0,
+    val muted: Boolean = false,
+    /** Lautstärke in Prozent (0 bis 200). */
+    val volume: Int = 100
 ) {
     /** Das Tempo, in dem diese Zeile tatsächlich klingt. */
     fun tempo(projectBpm: Int): Double = if (bpm > 0.0) bpm else projectBpm.toDouble()
@@ -60,6 +63,8 @@ data class Track(
         put("id", id)
         put("type", type.name)
         put("bpm", bpm)
+        put("muted", muted)
+        put("volume", volume)
         if (name != null) put("name", name)
         put("clips", JSONArray().apply { clips.forEach { put(it.toJson()) } })
     }
@@ -76,7 +81,9 @@ data class Track(
                 type = TrackType.valueOf(o.getString("type")),
                 clips = clips,
                 name = if (o.has("name")) o.getString("name") else null,
-                bpm = o.optDouble("bpm", 0.0)
+                bpm = o.optDouble("bpm", 0.0),
+                muted = o.optBoolean("muted", false),
+                volume = o.optInt("volume", 100)
             )
         }
     }
