@@ -10,6 +10,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import com.example.audiomix.data.ExportFormat
 import com.example.audiomix.data.Exporter
 import com.example.audiomix.data.ProjectRepository
 import com.example.audiomix.data.SettingsStore
@@ -27,6 +28,7 @@ fun AudioMixApp(repo: ProjectRepository, settings: SettingsStore) {
     val scope = rememberCoroutineScope()
 
     var darkMode by remember { mutableStateOf(settings.darkMode) }
+    var exportFormat by remember { mutableStateOf(settings.exportFormat) }
     var screen by rememberSaveable { mutableStateOf("start") }
     var openProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var projects by remember { mutableStateOf(repo.loadAll()) }
@@ -61,6 +63,11 @@ fun AudioMixApp(repo: ProjectRepository, settings: SettingsStore) {
             "project" -> ProjectScreen(
                 project = openProject!!,
                 onSave = { repo.save(it) },
+                exportFormat = exportFormat,
+                onExportFormatChange = {
+                    exportFormat = it
+                    settings.exportFormat = it
+                },
                 onClose = {
                     reload()
                     screen = "start"
@@ -89,12 +96,20 @@ fun AudioMixApp(repo: ProjectRepository, settings: SettingsStore) {
                 },
                 onExport = { id ->
                     val project = repo.get(id)
-                    if (project == null || project.tracks.all { it.clips.isEmpty() }) {
+                    if (exportFormat == ExportFormat.MP3) {
+                        Toast.makeText(
+                            context,
+                            "MP3-Export folgt in der nächsten Etappe. Bitte WAV oder Opus wählen (im Projekt).",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else if (project == null || project.tracks.all { it.clips.isEmpty() }) {
                         Toast.makeText(context, "Noch kein Audio vorhanden", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(context, "Export läuft …", Toast.LENGTH_SHORT).show()
                         scope.launch {
-                            val name = withContext(Dispatchers.IO) { Exporter.export(context, project) }
+                            val name = withContext(Dispatchers.IO) {
+                                Exporter.export(context, project, exportFormat)
+                            }
                             val message = if (name != null) {
                                 "Gespeichert in Downloads: $name"
                             } else {
