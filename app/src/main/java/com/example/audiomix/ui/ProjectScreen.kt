@@ -28,6 +28,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -53,6 +54,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -62,6 +64,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.audiomix.R
 import com.example.audiomix.data.AudioFiles
 import com.example.audiomix.data.AudioImport
 import com.example.audiomix.data.Exporter
@@ -97,6 +100,9 @@ fun ProjectScreen(
     val peaks = remember(project.id) { mutableStateMapOf<String, ByteArray>() }
     val player = remember { MixPlayer() }
 
+    // Alle ausgewählten Zeilen (mit ihrer Position)
+    val selectedRows = editor.tracks.withIndex().filter { it.value.id in editor.selectedTrackIds }
+
     var editingName by remember { mutableStateOf(false) }
     var nameText by remember(editingName) {
         mutableStateOf(
@@ -119,6 +125,15 @@ fun ProjectScreen(
     var restartKey by remember { mutableIntStateOf(0) }
     var plusMenu by remember { mutableStateOf(false) }
     var pendingBar by remember { mutableDoubleStateOf(0.0) }
+    var volumeOpen by remember { mutableStateOf(false) }
+
+    // Ohne ausgewählte Zeile gibt es keine Lautstärke-Zeile
+    LaunchedEffect(selectedRows.isEmpty()) {
+        if (selectedRows.isEmpty()) volumeOpen = false
+    }
+
+    // Stumm- und Lautstärke-Änderungen sollen auch während des Abspielens sofort wirken
+    val mixKey = editor.tracks.map { Pair(it.muted, it.volume) }
 
     /** Fortschritt in Prozent, solange gearbeitet wird (null = nichts los). */
     var busyPercent by remember { mutableStateOf<Int?>(null) }
@@ -370,7 +385,7 @@ fun ProjectScreen(
     }
 
     // Abspielen: Ton läuft, der Cursor folgt dem Ton
-    LaunchedEffect(playing, restartKey) {
+    LaunchedEffect(playing, restartKey, mixKey) {
         if (playing) {
             val renderer = MixRenderer(context, project.id, editor.tracks, editor.project.bpm)
             try {
@@ -461,6 +476,31 @@ fun ProjectScreen(
                     )
                 }
             }
+
+            // Lautstärke-Button
+            Box(
+                modifier = Modifier
+                    .clickable {
+                        if (selectedRows.isEmpty()) {
+                            Toast.makeText(
+                                context,
+                                "Erst eine Musikzeile auswählen",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            volumeOpen = !volumeOpen
+                        }
+                    }
+                    .padding(8.dp)
+            ) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_speaker),
+                    contentDescription = "Lautstärke",
+                    tint = if (volumeOpen) Color(0xFFE8607A) else colors.onBackground,
+                    modifier = Modifier.size(30.dp)
+                )
+            }
+
             Text(
                 text = "↑",
                 color = colors.onBackground,
@@ -590,6 +630,13 @@ fun ProjectScreen(
                                     editor.addDrumClip()
                                 }
                             )
+                            DropdownMenuItem(
+                                text = { Text("Hitsch") },
+                                onClick = {
+                                    plusMenu = false
+                                    editor.addHihatClip()
+                                }
+                            )
                         }
                     }
                 }
@@ -602,31 +649,51 @@ fun ProjectScreen(
                     modifier = Modifier.weight(1f)
                 )
 
-                // ---- Unterer Bereich: Zeilen-Leiste, Mülleimer, Play/Pause ----
+                // ---- Unterer Bereich: Lautstärke, Zeilen-Leiste, Mülleimer, Play/Pause, Stumm ----
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(colors.timelineBg)
                 ) {
-                    val selectedRow = editor.tracks.withIndex()
-                        .firstOrNull { it.value.id == editor.selectedTrackId }
-                    if (selectedRow != null) {
-                        val row = selectedRow.value
-                        RowInfoBar(
-                            trackId = row.id,
-                            name = row.displayName(selectedRow.index),
-                            bpmText = formatBpm(row.tempo(editor.project.bpm)),
-                            bpmEditable = row.type == TrackType.AUDIO,
-                            onRename = { editor.renameTrack(row.id, it) },
-                            onBpmCommit = { commitRowBpm(row.id, it) },
-                            onBpmLocked = {
-                                Toast.makeText(
-                                    context,
-                                    "Trommeln folgen immer dem Projekt-Tempo",
-                                    Toast.LENGTH_SHORT
-                                ).show()
+                    if (selectedRows.isNotEmpty()) {
+                        if (volumeOpen) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(colors.rowBg)
+                            ) {
+                                VolumeSlider(
+                                    percent = selectedRows[0].value.volume,
+                                    onChange = { editor.setVolume(it) }
+                                )
                             }
-                        )
+                            // dünne graue Trennlinie
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(1.dp)
+                                    .background(Color.Gray.copy(alpha = 0.6f))
+                            )
+                        }
+                        if (selectedRows.size == 1) {
+                            val row = selectedRows[0].value
+                            RowInfoBar(
+                                trackId = row.id,
+                                name = row.displayName(selectedRows[0].index),
+                                bpmText = formatBpm(row.tempo(editor.project.bpm)),
+                                bpmEditable = row.type == TrackType.AUDIO,
+                                onRename = { editor.renameTrack(row.id, it) },
+                                onBpmCommit = { commitRowBpm(row.id, it) },
+                                onBpmLocked = {
+                                    Toast.makeText(
+                                        context,
+                                        "Trommeln folgen immer dem Projekt-Tempo",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                },
+                                onDuplicate = { editor.duplicateTrack(row.id) }
+                            )
+                        }
                     }
 
                     Box(
@@ -634,7 +701,7 @@ fun ProjectScreen(
                             .fillMaxWidth()
                             .height(150.dp)
                     ) {
-                        if (editor.selectedTrackId != null) {
+                        if (selectedRows.isNotEmpty()) {
                             Text(
                                 text = "🗑️",
                                 fontSize = 44.sp,
@@ -644,6 +711,22 @@ fun ProjectScreen(
                                     .clickable { editor.deleteSelection() }
                                     .padding(8.dp)
                             )
+
+                            val allMuted = selectedRows.all { it.value.muted }
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.CenterEnd)
+                                    .padding(end = 24.dp)
+                                    .clickable { editor.toggleMute() }
+                                    .padding(8.dp)
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_speaker_muted),
+                                    contentDescription = "Stummschalten",
+                                    tint = if (allMuted) Color(0xFFE8607A) else colors.onBackground,
+                                    modifier = Modifier.size(44.dp)
+                                )
+                            }
                         }
                         Box(
                             modifier = Modifier
