@@ -8,10 +8,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -23,7 +25,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -33,6 +37,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.audiomix.R
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -41,6 +46,8 @@ fun RowInfoBar(
     name: String,
     bpmText: String,
     bpmEditable: Boolean,
+    volumeActive: Boolean,
+    onVolume: () -> Unit,
     onRename: (String) -> Unit,
     onBpmCommit: (String) -> Unit,
     onBpmLocked: () -> Unit,
@@ -62,26 +69,17 @@ fun RowInfoBar(
     LaunchedEffect(trackId, editingName) { if (editingName) nameFocus.requestFocus() }
     LaunchedEffect(trackId, editingBpm) { if (editingBpm) bpmFocus.requestFocus() }
 
-    val style = TextStyle(
-        color = colors.onBackground,
-        fontSize = 20.sp,
-        fontWeight = FontWeight.Bold
-    )
+    val style = TextStyle(color = colors.onBackground, fontSize = 18.sp, fontWeight = FontWeight.Bold)
     val dimmedStyle = style.copy(color = colors.onBackground.copy(alpha = 0.55f))
-    val smallStyle = TextStyle(
-        color = colors.onBackground,
-        fontSize = 15.sp,
-        fontWeight = FontWeight.Bold
-    )
 
     Row(
         modifier = modifier
             .fillMaxWidth()
             .background(colors.rowBg)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // ---- Name (links) ----
+        // ---- Name ----
         if (editingName) {
             BasicTextField(
                 value = nameValue,
@@ -94,9 +92,7 @@ fun RowInfoBar(
                     editingName = false
                     onRename(nameValue.text)
                 }),
-                modifier = Modifier
-                    .weight(1f)
-                    .focusRequester(nameFocus)
+                modifier = Modifier.weight(1f).focusRequester(nameFocus)
             )
         } else {
             Text(
@@ -104,30 +100,35 @@ fun RowInfoBar(
                 style = style,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .weight(1f)
-                    .combinedClickable(
-                        onClick = { editingName = true },
-                        onLongClick = { editingName = true }
-                    )
+                modifier = Modifier.weight(1f).combinedClickable(
+                    onClick = { editingName = true },
+                    onLongClick = { editingName = true }
+                )
             )
         }
 
-        Spacer(Modifier.width(10.dp))
+        // ---- Lautstärke (neben dem Namen) ----
+        Icon(
+            painter = painterResource(R.drawable.ic_speaker),
+            contentDescription = "Lautstärke",
+            tint = if (volumeActive) Color(0xFFE8607A) else colors.onBackground,
+            modifier = Modifier
+                .padding(horizontal = 8.dp)
+                .size(28.dp)
+                .clickable(onClick = onVolume)
+        )
 
-        // ---- Duplizieren (links neben der BPM) ----
+        // ---- Duplizieren (gleiche Schrift wie die BPM) ----
         Text(
             text = "Duplizieren",
-            style = smallStyle,
+            style = style,
             maxLines = 1,
-            modifier = Modifier
-                .clickable(onClick = onDuplicate)
-                .padding(vertical = 4.dp)
+            modifier = Modifier.clickable(onClick = onDuplicate).padding(vertical = 4.dp)
         )
 
         Spacer(Modifier.width(12.dp))
 
-        // ---- BPM (rechts) ----
+        // ---- BPM ----
         if (!bpmEditable) {
             Text(
                 text = "$bpmText bpm",
@@ -155,9 +156,7 @@ fun RowInfoBar(
                         editingBpm = false
                         onBpmCommit(bpmValue.text)
                     }),
-                    modifier = Modifier
-                        .width(64.dp)
-                        .focusRequester(bpmFocus)
+                    modifier = Modifier.width(56.dp).focusRequester(bpmFocus)
                 )
                 Text(text = " bpm", style = style)
             }
