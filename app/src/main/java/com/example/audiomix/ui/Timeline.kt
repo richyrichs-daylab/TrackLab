@@ -16,9 +16,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -38,17 +40,23 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.audiomix.R
@@ -59,8 +67,12 @@ import com.example.audiomix.data.Track
 import com.example.audiomix.data.TrackType
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.hypot
 import kotlin.math.round
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 const val HANDLE_DP = 28
 const val RULER_DP = 40
@@ -73,6 +85,9 @@ const val MAX_BAR_DP = 600
 private const val MODE_TRIM_START = 0
 private const val MODE_TRIM_END = 1
 private const val MODE_MOVE = 2
+private const val MODE_STRETCH_START = 3
+private const val MODE_STRETCH_END = 4
+private const val MODE_REPEAT = 5
 
 private class DragTarget(
     val mode: Int,
@@ -81,14 +96,16 @@ private class DragTarget(
     val clip: Clip
 )
 
-/** Zoom (Pixel pro Takt), seitliche Verschiebung und der Clip, der gerade gezogen wird. */
-class TimelineState(initialBarPx: Float) {
+/** Zoom, Verschiebung, der Clip, der gerade gezogen wird, und der Dehnen-Modus. */
+class TimelineState(initialBarPx: Float, private val density: Density) {
     var barPx by mutableFloatStateOf(initialBarPx)
     var scrollPx by mutableFloatStateOf(0f)
+    var scrollY by mutableFloatStateOf(0f)
+    var viewHeightPx by mutableFloatStateOf(0f)
     var ghostTrackId by mutableStateOf<String?>(null)
     var ghostClip by mutableStateOf<Clip?>(null)
+    var stretchMode by mutableStateOf(false)
 
-    /** Wie fein das sichtbare Raster gerade ist: 1, 2, 4, 8 oder 16 Striche pro Takt. */
     fun division(density: Density): Int {
         val minLinePx = with(density) { MIN_LINE_DP.dp.toPx() }
         for (d in intArrayOf(16, 8, 4, 2)) {
@@ -96,12 +113,22 @@ class TimelineState(initialBarPx: Float) {
         }
         return 1
     }
+
+    /** Wie weit man senkrecht höchstens scrollen kann (mit etwas freier Fläche unter der letzten Zeile). */
+    fun maxScrollY(rows: Int): Float {
+        val rowsTop = with(density) { (HANDLE_DP + RULER_DP).dp.toPx() }
+        val rowH = with(density) { ROW_DP.dp.toPx() }
+        val content = rows * rowH + rowH * 0.7f
+        return (content - (viewHeightPx - rowsTop)).coerceAtLeast(0f)
+    }
+
+    fun clampedScrollY(rows: Int): Float = scrollY.coerceIn(0f, maxScrollY(rows))
 }
 
 fun snapBar(bar: Double, division: Int): Double =
     (round(bar * division) / division).coerceAtLeast(0.0)
 
-/** Berechnet, wie der Clip während des Ziehens aussieht. */
+/** Kürzen, Verlängern und Verschieben. */
 private fun computeGhost(t: DragTarget, deltaBars: Double, div: Int): Clip {
     val c = t.clip
     val minLen = 1.0 / 16.0
@@ -123,7 +150,7 @@ private fun computeGhost(t: DragTarget, deltaBars: Double, div: Int): Clip {
         }
 
         MODE_TRIM_END -> {
-            val edge = snapBar(c.endBar + deltaBars, div)
+            val edge = snapBar(c.tileEnd + deltaBars, div)
             var len = edge - c.startBar
             val maxLen = if (t.type == TrackType.AUDIO && c.sourceLengthBar > 0.0) {
                 c.sourceLengthBar - c.offsetBar
@@ -138,6 +165,41 @@ private fun computeGhost(t: DragTarget, deltaBars: Double, div: Int): Clip {
     }
 }
 
+/** Dehnen: Der Block wird kürzer oder länger, sein Tempo ändert sich entsprechend. */
+private fun computeStretchGhost(mode: Int, c: Clip, deltaBars: Double, div: Int): Clip {
+    val minLen = 1.0 / 16.0
+    var len: Double
+    if (mode == MODE_STRETCH_END) {
+        val edge = snapBar(c.tileEnd + deltaBars, div)
+        len = maxOf(minLen, edge - c.startBar)
+    } else {
+        val edge = minOf(snapBar(c.startBar + deltaBars, div), c.tileEnd - minLen)
+        len = c.tileEnd - edge
+    }
+    var factor = (len / c.lengthBar).coerceIn(c.stretch / 4.0, c.stretch * 4.0)
+    len = c.lengthBar * factor
+    var start = if (mode == MODE_STRETCH_END) c.startBar else c.tileEnd - len
+    if (start < 0.0) {
+        len = c.tileEnd
+        factor = len / c.lengthBar
+        start = 0.0
+    }
+    return c.copy(
+        startBar = start,
+        lengthBar = len,
+        offsetBar = c.offsetBar * factor,
+        sourceLengthBar = c.sourceLengthBar * factor,
+        stretch = c.stretch / factor
+    )
+}
+
+/** Wiederholen: Der Block wird bis zur Zugposition wiederholt. */
+private fun computeRepeatGhost(c: Clip, edgeBar: Double, div: Int): Clip {
+    val snapped = snapBar(edgeBar, div)
+    val reps = ((snapped - c.tileEnd) / c.lengthBar).coerceIn(0.0, 64.0)
+    return c.copy(repeats = reps)
+}
+
 @Composable
 fun Timeline(
     editor: ProjectEditor,
@@ -149,25 +211,30 @@ fun Timeline(
     val density = LocalDensity.current
     val textMeasurer = rememberTextMeasurer()
     val tracks = editor.tracks
+    val rowsTopPx = with(density) { (HANDLE_DP + RULER_DP).dp.toPx() }
+    val rowHPx = with(density) { ROW_DP.dp.toPx() }
+    val clipTopPx = with(density) { 6.dp.toPx() }
+    val circleGrabPx = with(density) { 20.dp.toPx() }
 
-    fun regionTap(off: Offset, rowsTop: Float, rowH: Float, long: Boolean) {
+    fun regionTap(off: Offset, long: Boolean) {
         val bar = ((off.x + state.scrollPx) / state.barPx).toDouble()
-        if (off.y < rowsTop) {
+        if (off.y < rowsTopPx) {
             if (!long) editor.cursorBar = snapBar(bar, state.division(density))
             return
         }
-        val index = ((off.y - rowsTop) / rowH).toInt()
+        if (state.stretchMode) return
+        val sy = state.clampedScrollY(editor.tracks.size)
+        val index = ((off.y - rowsTopPx + sy) / rowHPx).toInt()
         val track = editor.tracks.getOrNull(index)
         if (track == null) {
-            editor.clearSelection()
+            // freie Fläche: wählt eine einzelne Zeile ab (bei mehreren passiert nichts)
+            if (editor.selectedTrackIds.size <= 1) editor.clearSelection()
             return
         }
         val ids = editor.selectedTrackIds
         val isSelected = track.id in ids
 
         if (long) {
-            // Gedrückthalten: ohne Auswahl wählt es die Zeile, ab zwei gewählten fügt es eine hinzu.
-            // (Bei genau einer gewählten Zeile übernimmt der 2-Sekunden-Timer.)
             if (ids.isEmpty()) {
                 editor.selectTrack(track.id)
             } else if (ids.size >= 2 && !isSelected) {
@@ -175,8 +242,6 @@ fun Timeline(
             }
             return
         }
-
-        // Antippen
         if (ids.size >= 2) {
             editor.toggleSelection(track.id)
             return
@@ -193,27 +258,50 @@ fun Timeline(
         }
     }
 
-    /** Was liegt unter dem Finger: ein Griff des ausgewählten Clips oder ein Clip zum Verschieben? */
-    fun findTarget(p: Offset, rowsTop: Float, rowH: Float, grab: Float): DragTarget? {
-        if (p.y < rowsTop) return null
-        val index = ((p.y - rowsTop) / rowH).toInt()
-        val track = editor.tracks.getOrNull(index) ?: return null
-        // Bearbeiten von Blöcken geht nur in einer einzeln ausgewählten Zeile
-        if (track.id != editor.selectedTrackId) return null
+    /** Was liegt unter dem Finger: Wiederholen-Kreis, Griff des gewählten Blocks oder ein Block? */
+    fun findTarget(p: Offset, grab: Float): DragTarget? {
+        if (p.y < rowsTopPx) return null
         val barPx = state.barPx
         val scroll = state.scrollPx
+        val sy = state.clampedScrollY(editor.tracks.size)
+        val current = editor.tracks
 
-        val selected = track.clips.firstOrNull { it.id == editor.selectedClipId }
-        if (selected != null) {
-            val left = (selected.startBar * barPx - scroll).toFloat()
-            val right = (selected.endBar * barPx - scroll).toFloat()
-            if (abs(p.x - left) <= grab) {
-                return DragTarget(MODE_TRIM_START, track.id, track.type, selected)
-            }
-            if (abs(p.x - right) <= grab) {
-                return DragTarget(MODE_TRIM_END, track.id, track.type, selected)
+        if (!state.stretchMode) {
+            for (r in current.indices) {
+                val cy = rowsTopPx + r * rowHPx - sy + clipTopPx
+                for (c in current[r].clips) {
+                    val cx = (c.endBar * barPx - scroll).toFloat()
+                    if (hypot(p.x - cx, p.y - cy) <= circleGrabPx) {
+                        return DragTarget(MODE_REPEAT, current[r].id, current[r].type, c)
+                    }
+                }
             }
         }
+
+        val index = ((p.y - rowsTopPx + sy) / rowHPx).toInt()
+        val track = current.getOrNull(index) ?: return null
+        if (track.id != editor.selectedTrackId) return null
+
+        var selected = track.clips.firstOrNull { it.id == editor.selectedClipId }
+        val ghost = state.ghostClip
+        if (state.stretchMode && ghost != null && selected != null && ghost.id == selected.id) selected = ghost
+        if (selected != null) {
+            val left = (selected.startBar * barPx - scroll).toFloat()
+            val right = (selected.tileEnd * barPx - scroll).toFloat()
+            if (abs(p.x - left) <= grab) {
+                return DragTarget(
+                    if (state.stretchMode) MODE_STRETCH_START else MODE_TRIM_START,
+                    track.id, track.type, selected
+                )
+            }
+            if (abs(p.x - right) <= grab) {
+                return DragTarget(
+                    if (state.stretchMode) MODE_STRETCH_END else MODE_TRIM_END,
+                    track.id, track.type, selected
+                )
+            }
+        }
+        if (state.stretchMode) return null
         val bar = ((p.x + scroll) / barPx).toDouble()
         val clip = track.clips.firstOrNull { bar >= it.startBar && bar < it.endBar } ?: return null
         return DragTarget(MODE_MOVE, track.id, track.type, clip)
@@ -221,39 +309,42 @@ fun Timeline(
 
     Row(modifier = modifier.fillMaxWidth().background(colors.timelineBg)) {
 
-        // Kreise am Zeilenanfang (immer sichtbar)
+        // Kreise am Zeilenanfang: immer sichtbar, scrollen senkrecht mit den Zeilen
         Column(Modifier.width(HEADER_DP.dp)) {
             Spacer(Modifier.height((HANDLE_DP + RULER_DP).dp))
-            tracks.forEach { track ->
-                TrackBadge(track, selected = track.id in editor.selectedTrackIds)
+            Box(Modifier.weight(1f).fillMaxWidth().clipToBounds()) {
+                Column(
+                    Modifier
+                        .wrapContentHeight(Alignment.Top, unbounded = true)
+                        .offset { IntOffset(0, -state.clampedScrollY(editor.tracks.size).roundToInt()) }
+                ) {
+                    tracks.forEach { track ->
+                        TrackBadge(track, selected = track.id in editor.selectedTrackIds)
+                    }
+                }
             }
         }
 
-        Box(
-            Modifier
-                .weight(1f)
-                .fillMaxHeight()
-                .clipToBounds()
-        ) {
+        Box(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
-                    // 1) Griffe ziehen und Clips verschieben (greift zuerst ein)
+                    .onSizeChanged { state.viewHeightPx = it.height.toFloat() }
+                    // 1) Griffe, Verschieben, Dehnen, Wiederholen (greift zuerst ein)
                     .pointerInput(Unit) {
-                        val rowsTop = (HANDLE_DP + RULER_DP).dp.toPx()
-                        val rowH = ROW_DP.dp.toPx()
                         val grab = 24.dp.toPx()
                         awaitEachGesture {
                             val down = awaitFirstDown(
                                 requireUnconsumed = false,
                                 pass = PointerEventPass.Initial
                             )
-                            val target = findTarget(down.position, rowsTop, rowH, grab)
-                                ?: return@awaitEachGesture
+                            val target = findTarget(down.position, grab) ?: return@awaitEachGesture
+                            val slop = viewConfiguration.touchSlop
+                            val isRepeat = target.mode == MODE_REPEAT
+                            val isStretch =
+                                target.mode == MODE_STRETCH_START || target.mode == MODE_STRETCH_END
 
                             if (target.mode == MODE_MOVE) {
-                                // Erst gedrückt halten, dann verschieben
-                                val slop = viewConfiguration.touchSlop
                                 val cancelled = withTimeoutOrNull<Boolean>(
                                     viewConfiguration.longPressTimeoutMillis
                                 ) {
@@ -276,33 +367,63 @@ fun Timeline(
                             }
 
                             val startX = down.position.x
-                            state.ghostTrackId = target.trackId
-                            state.ghostClip = target.clip
+                            var moved = false
+                            if (!isRepeat) {
+                                state.ghostTrackId = target.trackId
+                                state.ghostClip = target.clip
+                            }
                             while (true) {
                                 val event = awaitPointerEvent(PointerEventPass.Initial)
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                                 change.consume()
                                 if (change.changedToUpIgnoreConsumed()) break
-                                val deltaBars = ((change.position.x - startX) / state.barPx).toDouble()
-                                state.ghostClip = computeGhost(target, deltaBars, state.division(this))
+                                if (!moved && abs(change.position.x - startX) > slop) moved = true
+                                val div = state.division(this)
+                                if (isRepeat) {
+                                    if (moved) {
+                                        val edge = ((change.position.x + state.scrollPx) / state.barPx).toDouble()
+                                        state.ghostTrackId = target.trackId
+                                        state.ghostClip = computeRepeatGhost(target.clip, edge, div)
+                                    }
+                                } else {
+                                    val deltaBars = ((change.position.x - startX) / state.barPx).toDouble()
+                                    state.ghostClip = if (isStretch) {
+                                        computeStretchGhost(target.mode, target.clip, deltaBars, div)
+                                    } else {
+                                        computeGhost(target, deltaBars, div)
+                                    }
+                                }
                             }
+
                             val ghost = state.ghostClip
-                            state.ghostClip = null
-                            state.ghostTrackId = null
-                            if (ghost != null && ghost != target.clip) {
-                                editor.replaceClip(target.trackId, ghost)
+                            if (isRepeat) {
+                                state.ghostClip = null
+                                state.ghostTrackId = null
+                                if (!moved) {
+                                    editor.addRepeat(target.trackId, target.clip.id)
+                                } else if (ghost != null && ghost != target.clip) {
+                                    editor.replaceClip(target.trackId, ghost)
+                                }
+                            } else if (!isStretch) {
+                                state.ghostClip = null
+                                state.ghostTrackId = null
+                                if (ghost != null && ghost != target.clip) {
+                                    editor.replaceClip(target.trackId, ghost)
+                                }
                             }
+                            // beim Dehnen bleibt der Entwurf stehen, bis X oder Haken gedrückt wird
                         }
                     }
                     // 2) Antippen und Gedrückthalten (Zeilen auswählen)
                     .pointerInput(Unit) {
-                        val rowsTop = (HANDLE_DP + RULER_DP).dp.toPx()
-                        val rowH = ROW_DP.dp.toPx()
                         detectTapGestures(
                             onPress = { off ->
-                                // Ist genau eine Zeile gewählt, fügt 2 Sekunden Gedrückthalten eine weitere hinzu
-                                if (editor.selectedTrackIds.size == 1 && off.y >= rowsTop) {
-                                    val index = ((off.y - rowsTop) / rowH).toInt()
+                                // Bei genau einer gewählten Zeile fügt 2 Sekunden Gedrückthalten eine weitere hinzu
+                                if (editor.selectedTrackIds.size == 1 &&
+                                    !state.stretchMode && off.y >= rowsTopPx
+                                ) {
+                                    val sy = state.clampedScrollY(editor.tracks.size)
+                                    val index = ((off.y - rowsTopPx + sy) / rowHPx).toInt()
                                     val pressed = editor.tracks.getOrNull(index)
                                     if (pressed != null && pressed.id !in editor.selectedTrackIds) {
                                         val result = kotlinx.coroutines.withTimeoutOrNull(2000L) {
@@ -312,11 +433,11 @@ fun Timeline(
                                     }
                                 }
                             },
-                            onTap = { off -> regionTap(off, rowsTop, rowH, false) },
-                            onLongPress = { off -> regionTap(off, rowsTop, rowH, true) }
+                            onTap = { off -> regionTap(off, false) },
+                            onLongPress = { off -> regionTap(off, true) }
                         )
                     }
-                    // 3) Scrollen und Zoomen
+                    // 3) Scrollen (seitlich und senkrecht) und Zoomen
                     .pointerInput(Unit) {
                         val minBar = MIN_BAR_DP.dp.toPx()
                         val maxBar = MAX_BAR_DP.dp.toPx()
@@ -327,6 +448,8 @@ fun Timeline(
                                 ((state.scrollPx + centroid.x) * factor - centroid.x - pan.x)
                                     .coerceAtLeast(0f)
                             state.barPx = newBar
+                            val n = editor.tracks.size
+                            state.scrollY = (state.clampedScrollY(n) - pan.y).coerceIn(0f, state.maxScrollY(n))
                         }
                     }
             ) {
@@ -342,169 +465,178 @@ fun Timeline(
                 val step = barPx / div
                 val currentTracks = editor.tracks
                 val selectedIds = editor.selectedTrackIds
-                val rowsBottom = rowsTop + currentTracks.size * rowH
+                val sy = state.clampedScrollY(currentTracks.size)
+                val rowsBottom = rowsTop + currentTracks.size * rowH - sy
                 val ghost = state.ghostClip
                 val secondsPerBar = 240.0 / editor.project.bpm
 
-                // Hintergründe
                 drawRect(colors.ruler, Offset(0f, handleH), Size(w, rulerH))
-                if (currentTracks.isNotEmpty()) {
-                    drawRect(colors.rowBg, Offset(0f, rowsTop), Size(w, rowsBottom - rowsTop))
-                }
-                currentTracks.forEachIndexed { r, t ->
-                    val y = rowsTop + r * rowH
-                    if (t.id in selectedIds) {
-                        drawRect(
-                            colors.onBackground.copy(alpha = 0.10f),
-                            Offset(0f, y),
-                            Size(w, rowH)
+
+                // ---- Zeilenbereich (scrollt senkrecht, das Lineal bleibt stehen) ----
+                clipRect(0f, rowsTop, w, h) {
+                    if (currentTracks.isNotEmpty()) {
+                        drawRect(colors.rowBg, Offset(0f, rowsTop - sy), Size(w, currentTracks.size * rowH))
+                    }
+                    currentTracks.forEachIndexed { r, t ->
+                        val y = rowsTop + r * rowH - sy
+                        if (t.id in selectedIds) {
+                            drawRect(colors.onBackground.copy(alpha = 0.10f), Offset(0f, y), Size(w, rowH))
+                        }
+                        drawLine(
+                            colors.line.copy(alpha = 0.5f),
+                            Offset(0f, y + rowH),
+                            Offset(w, y + rowH),
+                            1f
                         )
                     }
-                    drawLine(
-                        colors.line.copy(alpha = 0.5f),
-                        Offset(0f, y + rowH),
-                        Offset(w, y + rowH),
-                        1f
-                    )
+
+                    val first = floor(scroll / step).toInt().coerceAtLeast(0)
+                    val last = ceil((scroll + w) / step).toInt()
+                    if (currentTracks.isNotEmpty()) {
+                        for (i in first..last) {
+                            val x = i * step - scroll
+                            val isBar = i % div == 0
+                            drawLine(
+                                colors.line.copy(alpha = if (isBar) 0.55f else 0.25f),
+                                Offset(x, rowsTop - sy),
+                                Offset(x, rowsBottom),
+                                1f
+                            )
+                        }
+                    }
+
+                    // Blöcke
+                    currentTracks.forEachIndexed { r, t ->
+                        val y = rowsTop + r * rowH - sy
+                        if (y + rowH < rowsTop || y > h) return@forEachIndexed
+                        val rowTempo = if (t.bpm > 0.0) t.bpm else editor.project.bpm.toDouble()
+
+                        t.clips.forEach { original ->
+                            val c = if (ghost != null && ghost.id == original.id) ghost else original
+                            if (c.endBar * barPx - scroll < 0f || c.startBar * barPx - scroll > w) {
+                                return@forEach
+                            }
+                            val gray = t.muted || c.muted
+                            val base = when {
+                                gray -> Color(0xFFBDBDBD)
+                                t.type == TrackType.AUDIO -> Color(0xFFE8C14B)
+                                t.type == TrackType.DRUM -> Color(0xFFF2C2FF)
+                                else -> Color(0xFF8AD8FF)
+                            }
+                            val tickColor = when {
+                                gray -> Color(0xFF757575)
+                                t.type == TrackType.DRUM -> Color(0xFF8E2C9A)
+                                else -> Color(0xFF2A6FA8)
+                            }
+                            val waveColor = if (gray) Color(0xFF757575) else Color(0xFF7A5C10)
+                            val color =
+                                if (c.id == editor.selectedClipId) lerp(base, Color.Gray, 0.4f) else base
+                            val top = y + 6.dp.toPx()
+                            val clipH = rowH - 12.dp.toPx()
+                            val gap = if (c.repeats > 1e-9) 2.dp.toPx() else 0f
+
+                            c.tiles().forEach { tile ->
+                                val left = (tile.startBar * barPx - scroll).toFloat()
+                                val width = (tile.lengthBar * barPx).toFloat()
+                                if (left + width < 0f || left > w) return@forEach
+                                drawRoundRect(
+                                    color,
+                                    Offset(left, top),
+                                    Size(maxOf(width - gap, 1f), clipH),
+                                    CornerRadius(12.dp.toPx())
+                                )
+                                if (t.type != TrackType.AUDIO) {
+                                    val spacing = 1.0 / tile.stretch
+                                    if (barPx * spacing / 4.0 >= 8.dp.toPx()) {
+                                        val off = if (t.type == TrackType.HIHAT) 0.5 else 0.0
+                                        var k = ceil(tile.startBar * 4.0 / spacing - off - 1e-9)
+                                        while ((k + off) * spacing / 4.0 < tile.endBar - 1e-9) {
+                                            val hx = ((k + off) * spacing / 4.0 * barPx - scroll).toFloat()
+                                            drawRoundRect(
+                                                tickColor,
+                                                Offset(hx - 2.dp.toPx(), y + 24.dp.toPx()),
+                                                Size(4.dp.toPx(), rowH - 48.dp.toPx()),
+                                                CornerRadius(2.dp.toPx())
+                                            )
+                                            k += 1.0
+                                        }
+                                    }
+                                } else {
+                                    val data = tile.sourceFile?.let { peaks[it] }
+                                    if (data != null && data.isNotEmpty()) {
+                                        val cy = top + clipH / 2f
+                                        val x0 = maxOf(left, 0f)
+                                        val x1 = minOf(left + width, w)
+                                        val stepPx = 3.dp.toPx()
+                                        val speed = tile.speed(rowTempo)
+                                        var x = x0
+                                        while (x < x1) {
+                                            val barInTile = (x - left) / barPx
+                                            val sec = (tile.offsetBar + barInTile) * secondsPerBar * speed
+                                            val idx = (sec * AudioImport.PEAKS_PER_SECOND).toInt()
+                                            if (idx >= 0 && idx < data.size) {
+                                                val amp = (data[idx].toInt() and 0xFF) / 255f
+                                                val half = maxOf(1.5.dp.toPx(), amp * clipH / 2f * 0.9f)
+                                                drawLine(
+                                                    waveColor,
+                                                    Offset(x, cy - half),
+                                                    Offset(x, cy + half),
+                                                    2.dp.toPx()
+                                                )
+                                            }
+                                            x += stepPx
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Wiederholen-Kreis an der rechten oberen Ecke
+                            if (!state.stretchMode) {
+                                drawRepeatBadge(
+                                    Offset((c.endBar * barPx - scroll).toFloat(), top),
+                                    11.dp.toPx(),
+                                    colors.background,
+                                    colors.onBackground
+                                )
+                            }
+                        }
+                    }
+
+                    // Halbkreis-Griffe am ausgewählten Block
+                    val selIndex = currentTracks.indexOfFirst { it.id == editor.selectedTrackId }
+                    if (selIndex >= 0 && editor.selectedClipId != null) {
+                        val original = currentTracks[selIndex].clips.firstOrNull { it.id == editor.selectedClipId }
+                        if (original != null) {
+                            val sc = if (ghost != null && ghost.id == original.id) ghost else original
+                            val cy = rowsTop + selIndex * rowH - sy + rowH / 2f
+                            drawHandle((sc.startBar * barPx - scroll).toFloat(), cy, 14.dp.toPx(), true)
+                            drawHandle((sc.tileEnd * barPx - scroll).toFloat(), cy, 14.dp.toPx(), false)
+                        }
+                    }
                 }
 
-                // Taktraster und Taktzahlen
+                // ---- Taktraster im Lineal und Taktzahlen ----
                 val first = floor(scroll / step).toInt().coerceAtLeast(0)
                 val last = ceil((scroll + w) / step).toInt()
                 for (i in first..last) {
                     val x = i * step - scroll
                     val isBar = i % div == 0
                     val tickTop = if (isBar) handleH else handleH + rulerH * 0.6f
-                    drawLine(
-                        colors.line,
-                        Offset(x, tickTop),
-                        Offset(x, rowsTop),
-                        if (isBar) 2f else 1f
-                    )
-                    if (currentTracks.isNotEmpty()) {
-                        drawLine(
-                            colors.line.copy(alpha = if (isBar) 0.55f else 0.25f),
-                            Offset(x, rowsTop),
-                            Offset(x, rowsBottom),
-                            1f
-                        )
-                    }
-                    // Taktzahl nur zeichnen, wenn sie sichtbar ist
+                    drawLine(colors.line, Offset(x, tickTop), Offset(x, rowsTop), if (isBar) 2f else 1f)
                     if (isBar && x > -40.dp.toPx() && x < w) {
                         val label = textMeasurer.measure(
                             (i / div + 1).toString(),
                             style = TextStyle(color = colors.rulerText, fontSize = 15.sp)
                         )
-                        drawText(
-                            label,
-                            topLeft = Offset(x + 4.dp.toPx(), handleH + 3.dp.toPx())
-                        )
+                        drawText(label, topLeft = Offset(x + 4.dp.toPx(), handleH + 3.dp.toPx()))
                     }
                 }
 
-                // Clips
-                currentTracks.forEachIndexed { r, t ->
-                    val y = rowsTop + r * rowH
-                    val base = when {
-                        t.muted -> Color(0xFFBDBDBD)
-                        t.type == TrackType.AUDIO -> Color(0xFFE8C14B)
-                        t.type == TrackType.DRUM -> Color(0xFFF2C2FF)
-                        else -> Color(0xFF8AD8FF)
-                    }
-                    val tickColor = when {
-                        t.muted -> Color(0xFF757575)
-                        t.type == TrackType.DRUM -> Color(0xFF8E2C9A)
-                        else -> Color(0xFF2A6FA8)
-                    }
-                    val waveColor = if (t.muted) Color(0xFF757575) else Color(0xFF7A5C10)
-
-                    t.clips.forEach { original ->
-                        val c = if (ghost != null && ghost.id == original.id) ghost else original
-                        val left = (c.startBar * barPx - scroll).toFloat()
-                        val width = (c.lengthBar * barPx).toFloat()
-                        if (left + width < 0f || left > w) return@forEach
-
-                        val color = if (c.id == editor.selectedClipId) lerp(base, Color.Gray, 0.4f) else base
-                        val top = y + 6.dp.toPx()
-                        val clipH = rowH - 12.dp.toPx()
-                        drawRoundRect(
-                            color,
-                            Offset(left, top),
-                            Size(width, clipH),
-                            CornerRadius(12.dp.toPx())
-                        )
-
-                        if (t.type != TrackType.AUDIO) {
-                            // Schläge: Trommel auf den Zählzeiten, Hitsch genau dazwischen
-                            if (barPx / 4f >= 8.dp.toPx()) {
-                                val offsetBeat = if (t.type == TrackType.HIHAT) 0.5 else 0.0
-                                var k = ceil(c.startBar * 4.0 - offsetBeat - 1e-9)
-                                while ((k + offsetBeat) / 4.0 < c.endBar - 1e-9) {
-                                    val hx = ((k + offsetBeat) / 4.0 * barPx - scroll).toFloat()
-                                    drawRoundRect(
-                                        tickColor,
-                                        Offset(hx - 2.dp.toPx(), y + 24.dp.toPx()),
-                                        Size(4.dp.toPx(), rowH - 48.dp.toPx()),
-                                        CornerRadius(2.dp.toPx())
-                                    )
-                                    k += 1.0
-                                }
-                            }
-                        } else {
-                            val data = c.sourceFile?.let { peaks[it] }
-                            if (data != null && data.isNotEmpty()) {
-                                val cy = top + clipH / 2f
-                                val x0 = maxOf(left, 0f)
-                                val x1 = minOf(left + width, w)
-                                val stepPx = 3.dp.toPx()
-                                val rowTempo = if (t.bpm > 0.0) t.bpm else editor.project.bpm.toDouble()
-                                var x = x0
-                                while (x < x1) {
-                                    val barInClip = (x - left) / barPx
-                                    val sec = (c.offsetBar + barInClip) * secondsPerBar * (rowTempo / c.sourceBpm)
-                                    val idx = (sec * AudioImport.PEAKS_PER_SECOND).toInt()
-                                    if (idx >= 0 && idx < data.size) {
-                                        val amp = (data[idx].toInt() and 0xFF) / 255f
-                                        val half = maxOf(1.5.dp.toPx(), amp * clipH / 2f * 0.9f)
-                                        drawLine(
-                                            waveColor,
-                                            Offset(x, cy - half),
-                                            Offset(x, cy + half),
-                                            2.dp.toPx()
-                                        )
-                                    }
-                                    x += stepPx
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Halbkreis-Griffe am ausgewählten Clip (nur bei einer einzelnen gewählten Zeile)
-                val selIndex = currentTracks.indexOfFirst { it.id == editor.selectedTrackId }
-                if (selIndex >= 0 && editor.selectedClipId != null) {
-                    val original = currentTracks[selIndex].clips
-                        .firstOrNull { it.id == editor.selectedClipId }
-                    if (original != null) {
-                        val sc = if (ghost != null && ghost.id == original.id) ghost else original
-                        val cy = rowsTop + selIndex * rowH + rowH / 2f
-                        val l = (sc.startBar * barPx - scroll).toFloat()
-                        val r = (sc.endBar * barPx - scroll).toFloat()
-                        drawHandle(l, cy, 14.dp.toPx(), true)
-                        drawHandle(r, cy, 14.dp.toPx(), false)
-                    }
-                }
-
-                // Vertikalcursor mit Ziehgriff
+                // ---- Vertikalcursor mit Ziehgriff ----
                 val cx = (editor.cursorBar * barPx - scroll).toFloat()
                 if (cx >= -20.dp.toPx() && cx <= w + 20.dp.toPx()) {
                     val gradient = Brush.verticalGradient(
-                        listOf(
-                            Color(0xFFF0E0E0),
-                            Color(0xFFE8607A),
-                            Color(0xFF8E2C75),
-                            Color(0xFF2A1A2E)
-                        ),
+                        listOf(Color(0xFFF0E0E0), Color(0xFFE8607A), Color(0xFF8E2C75), Color(0xFF2A1A2E)),
                         startY = 0f,
                         endY = h
                     )
@@ -580,22 +712,46 @@ fun Timeline(
 private fun DrawScope.drawHandle(cx: Float, cy: Float, radius: Float, leftSide: Boolean) {
     val startAngle = if (leftSide) 90f else 270f
     drawArc(
-        Color.Black,
-        startAngle,
-        180f,
-        true,
-        Offset(cx - radius, cy - radius),
-        Size(radius * 2f, radius * 2f)
+        Color.Black, startAngle, 180f, true,
+        Offset(cx - radius, cy - radius), Size(radius * 2f, radius * 2f)
     )
     val inner = radius - 3.dp.toPx()
     drawArc(
-        Color(0xFFE8607A),
-        startAngle,
-        180f,
-        true,
-        Offset(cx - inner, cy - inner),
-        Size(inner * 2f, inner * 2f)
+        Color(0xFFE8607A), startAngle, 180f, true,
+        Offset(cx - inner, cy - inner), Size(inner * 2f, inner * 2f)
     )
+}
+
+/** Kreis mit rosa Wiederholungspfeil. */
+private fun DrawScope.drawRepeatBadge(center: Offset, radius: Float, bg: Color, outline: Color) {
+    drawCircle(bg, radius, center)
+    drawCircle(outline.copy(alpha = 0.45f), radius, center, style = Stroke(width = 1.2.dp.toPx()))
+    val brush = Brush.linearGradient(
+        listOf(Color(0xFFFFB3C7), Color(0xFFE8607A), Color(0xFF8E2C75)),
+        start = Offset(center.x - radius, center.y - radius),
+        end = Offset(center.x + radius, center.y + radius)
+    )
+    val r = radius * 0.55f
+    drawArc(
+        brush, -50f, 270f, false,
+        Offset(center.x - r, center.y - r), Size(r * 2f, r * 2f),
+        style = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round)
+    )
+    val a = Math.toRadians(220.0)
+    val ex = center.x + r * cos(a).toFloat()
+    val ey = center.y + r * sin(a).toFloat()
+    val tx = -sin(a).toFloat()
+    val ty = cos(a).toFloat()
+    val nx = cos(a).toFloat()
+    val ny = sin(a).toFloat()
+    val hs = radius * 0.42f
+    val head = Path().apply {
+        moveTo(ex + tx * hs, ey + ty * hs)
+        lineTo(ex - tx * hs * 0.3f + nx * hs * 0.75f, ey - ty * hs * 0.3f + ny * hs * 0.75f)
+        lineTo(ex - tx * hs * 0.3f - nx * hs * 0.75f, ey - ty * hs * 0.3f - ny * hs * 0.75f)
+        close()
+    }
+    drawPath(head, brush)
 }
 
 @Composable
@@ -619,24 +775,12 @@ private fun TrackBadge(track: Track, selected: Boolean) {
     }
 
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(ROW_DP.dp),
+        modifier = Modifier.fillMaxWidth().height(ROW_DP.dp),
         contentAlignment = Alignment.Center
     ) {
         if (selected) {
-            Box(
-                Modifier
-                    .size(70.dp)
-                    .clip(CircleShape)
-                    .background(glowColor.copy(alpha = 0.22f))
-            )
-            Box(
-                Modifier
-                    .size(62.dp)
-                    .clip(CircleShape)
-                    .background(glowColor.copy(alpha = 0.45f))
-            )
+            Box(Modifier.size(70.dp).clip(CircleShape).background(glowColor.copy(alpha = 0.22f)))
+            Box(Modifier.size(62.dp).clip(CircleShape).background(glowColor.copy(alpha = 0.45f)))
         }
         Box(
             modifier = Modifier
