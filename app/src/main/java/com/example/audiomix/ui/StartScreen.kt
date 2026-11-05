@@ -41,6 +41,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.audiomix.data.Project
@@ -157,12 +158,13 @@ private fun ProjectCard(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .height(76.dp)
             .background(colors.card)
             .combinedClickable(
                 onClick = { if (!editing) onOpen() },
                 onLongClick = { if (!editing) onStartEdit() }
             )
-            .padding(16.dp),
+            .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (editing) {
@@ -170,7 +172,7 @@ private fun ProjectCard(
                 value = text,
                 onValueChange = { text = it },
                 singleLine = true,
-                textStyle = TextStyle(color = colors.cardText, fontSize = 22.sp),
+                textStyle = TextStyle(color = colors.cardText, fontSize = 20.sp),
                 cursorBrush = SolidColor(colors.cardText),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { onCommit(text.text) }),
@@ -197,14 +199,24 @@ private fun ProjectCard(
             Text(
                 text = project.name,
                 color = colors.cardText,
-                fontSize = 22.sp,
+                fontSize = 20.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
-            Text(
-                text = formatDuration(project.durationMs),
-                color = colors.cardText,
-                fontSize = 22.sp
-            )
+            Spacer(Modifier.width(8.dp))
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = "${project.bpm} bpm",
+                    color = colors.cardText,
+                    fontSize = 13.sp
+                )
+                Text(
+                    text = formatDuration(project.durationMs),
+                    color = colors.cardText,
+                    fontSize = 16.sp
+                )
+            }
         }
     }
 }
