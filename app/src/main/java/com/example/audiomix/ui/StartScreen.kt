@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -63,58 +64,66 @@ fun StartScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(listOf(Color(0xFFDC4358), Color(0xFF77EBDC)))
-            )
+            .background(Brush.verticalGradient(listOf(Color(0xFFDC4358), Color(0xFF77EBDC))))
     ) {
-        Column(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .systemBarsPadding()
-                .padding(horizontal = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(horizontal = 12.dp)
         ) {
-            Spacer(Modifier.height(12.dp))
-            Text(
-                text = "STARTSEITE",
-                color = Color(0xFF00FFFF),
-                fontSize = 40.sp,
-                fontWeight = FontWeight.Black
-            )
-            Spacer(Modifier.height(24.dp))
-            PlaceholderButton(label = "+", size = 110.dp, onClick = onNewProject)
-            Spacer(Modifier.height(32.dp))
+            val half = maxHeight / 2
 
-            LazyColumn(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+            // Oben: Titel und Plus
+            Column(
+                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                items(projects, key = { it.id }) { project ->
-                    ProjectCard(
-                        project = project,
-                        editing = editingId == project.id,
-                        colors = colors,
-                        onOpen = { onOpenProject(project.id) },
-                        onStartEdit = { editingId = project.id },
-                        onCommit = { newName ->
-                            editingId = null
-                            onRename(project.id, newName)
-                        },
-                        onDeleteClick = { deleteCandidate = project },
-                        onExportClick = { onExport(project.id) }
-                    )
-                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "STARTSEITE",
+                    color = Color(0xFF00FFFF),
+                    fontSize = 40.sp,
+                    fontWeight = FontWeight.Black
+                )
+                Spacer(Modifier.height(24.dp))
+                PlaceholderButton(label = "+", size = 110.dp, onClick = onNewProject)
             }
 
-            Text(
-                text = "⚙️",
-                fontSize = 44.sp,
+            // Unten: Projektliste, die nach oben nur bis zur Bildschirmhälfte reicht, und das Zahnrad
+            Column(
                 modifier = Modifier
-                    .clickable(onClick = onOpenSettings)
-                    .padding(16.dp)
-            )
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(half),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(projects, key = { it.id }) { project ->
+                        ProjectCard(
+                            project = project,
+                            editing = editingId == project.id,
+                            colors = colors,
+                            onOpen = { onOpenProject(project.id) },
+                            onStartEdit = { editingId = project.id },
+                            onCommit = { newName ->
+                                editingId = null
+                                onRename(project.id, newName)
+                            },
+                            onDeleteClick = { deleteCandidate = project },
+                            onExportClick = { onExport(project.id) }
+                        )
+                    }
+                }
+                Text(
+                    text = "⚙️",
+                    fontSize = 44.sp,
+                    modifier = Modifier.clickable(onClick = onOpenSettings).padding(16.dp)
+                )
+            }
         }
     }
 
@@ -176,24 +185,18 @@ private fun ProjectCard(
                 cursorBrush = SolidColor(colors.cardText),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { onCommit(text.text) }),
-                modifier = Modifier
-                    .weight(1f)
-                    .focusRequester(focus)
+                modifier = Modifier.weight(1f).focusRequester(focus)
             )
             Text(
                 text = "🗑️",
                 fontSize = 28.sp,
-                modifier = Modifier
-                    .clickable(onClick = onDeleteClick)
-                    .padding(6.dp)
+                modifier = Modifier.clickable(onClick = onDeleteClick).padding(6.dp)
             )
             Spacer(Modifier.width(4.dp))
             Text(
                 text = "📁",
                 fontSize = 28.sp,
-                modifier = Modifier
-                    .clickable(onClick = onExportClick)
-                    .padding(6.dp)
+                modifier = Modifier.clickable(onClick = onExportClick).padding(6.dp)
             )
         } else {
             Text(
@@ -206,11 +209,7 @@ private fun ProjectCard(
             )
             Spacer(Modifier.width(8.dp))
             Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    text = "${project.bpm} bpm",
-                    color = colors.cardText,
-                    fontSize = 13.sp
-                )
+                Text(text = "${project.bpm} bpm", color = colors.cardText, fontSize = 13.sp)
                 Text(
                     text = formatDuration(project.durationMs),
                     color = colors.cardText,
