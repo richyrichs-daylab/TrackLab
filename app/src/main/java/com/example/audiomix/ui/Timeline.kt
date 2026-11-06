@@ -61,8 +61,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.audiomix.R
 import com.example.audiomix.data.AudioImport
+import com.example.audiomix.data.CELL_BASE
 import com.example.audiomix.data.Clip
 import com.example.audiomix.data.ProjectEditor
+import com.example.audiomix.data.Sounds
 import com.example.audiomix.data.Track
 import com.example.audiomix.data.TrackType
 import kotlin.math.abs
@@ -189,15 +191,19 @@ private fun computeStretchGhost(mode: Int, c: Clip, deltaBars: Double, div: Int)
         lengthBar = len,
         offsetBar = c.offsetBar * factor,
         sourceLengthBar = c.sourceLengthBar * factor,
+        repeatPartial = c.repeatPartial * factor,
         stretch = c.stretch / factor
     )
 }
 
 /** Wiederholen: Der Block wird bis zur Zugposition wiederholt. */
 private fun computeRepeatGhost(c: Clip, edgeBar: Double, div: Int): Clip {
-    val snapped = snapBar(edgeBar, div)
-    val reps = ((snapped - c.tileEnd) / c.lengthBar).coerceIn(0.0, 64.0)
-    return c.copy(repeats = reps)
+    val total = snapBar(edgeBar, div) - c.tileEnd
+    if (total <= 1e-6) return c.copy(repeatCount = 0, repeatPartial = 0.0)
+    val count = ceil(total / c.lengthBar - 1e-9).toInt().coerceIn(1, 64)
+    val lastLen = total - (count - 1) * c.lengthBar
+    val partial = if (lastLen >= c.lengthBar - 1e-6) 0.0 else lastLen
+    return c.copy(repeatCount = count, repeatPartial = partial)
 }
 
 @Composable
@@ -266,13 +272,16 @@ fun Timeline(
         val sy = state.clampedScrollY(editor.tracks.size)
         val current = editor.tracks
 
+        // Wiederholen-Kreis: nur am ausgewählten Block
         if (!state.stretchMode) {
-            for (r in current.indices) {
-                val cy = rowsTopPx + r * rowHPx - sy + clipTopPx
-                for (c in current[r].clips) {
-                    val cx = (c.endBar * barPx - scroll).toFloat()
+            val selIndex = current.indexOfFirst { it.id == editor.selectedTrackId }
+            if (selIndex >= 0) {
+                val selClip = current[selIndex].clips.firstOrNull { it.id == editor.selectedClipId }
+                if (selClip != null) {
+                    val cy = rowsTopPx + selIndex * rowHPx - sy + clipTopPx
+                    val cx = (selClip.endBar * barPx - scroll).toFloat()
                     if (hypot(p.x - cx, p.y - cy) <= circleGrabPx) {
-                        return DragTarget(MODE_REPEAT, current[r].id, current[r].type, c)
+                        return DragTarget(MODE_REPEAT, current[selIndex].id, current[selIndex].type, selClip)
                     }
                 }
             }
@@ -509,7 +518,9 @@ fun Timeline(
                     currentTracks.forEachIndexed { r, t ->
                         val y = rowsTop + r * rowH - sy
                         if (y + rowH < rowsTop || y > h) return@forEachIndexed
+                        val isPattern = t.type != TrackType.AUDIO
                         val rowTempo = if (t.bpm > 0.0) t.bpm else editor.project.bpm.toDouble()
+                        val laneCount = Sounds.laneCount(t.type)
 
                         t.clips.forEach { original ->
                             val c = if (ghost != null && ghost.id == original.id) ghost else original
@@ -520,46 +531,53 @@ fun Timeline(
                             val base = when {
                                 gray -> Color(0xFFBDBDBD)
                                 t.type == TrackType.AUDIO -> Color(0xFFE8C14B)
-                                t.type == TrackType.DRUM -> Color(0xFFF2C2FF)
-                                else -> Color(0xFF8AD8FF)
+                                t.type == TrackType.EFFECT -> Color(0xFFFF7F9C)
+                                else -> Color(0xFF62A5FF)
                             }
                             val tickColor = when {
                                 gray -> Color(0xFF757575)
-                                t.type == TrackType.DRUM -> Color(0xFF8E2C9A)
-                                else -> Color(0xFF2A6FA8)
+                                t.type == TrackType.EFFECT -> Color(0xFF9E1B55)
+                                else -> Color(0xFF1F4FA8)
                             }
                             val waveColor = if (gray) Color(0xFF757575) else Color(0xFF7A5C10)
                             val color =
                                 if (c.id == editor.selectedClipId) lerp(base, Color.Gray, 0.4f) else base
                             val top = y + 6.dp.toPx()
                             val clipH = rowH - 12.dp.toPx()
-                            val gap = if (c.repeats > 1e-9) 2.dp.toPx() else 0f
+                            val gap = if (c.repeatCount > 0) 2.dp.toPx() else 0f
 
-                            c.tiles().forEach { tile ->
+                            c.tiles().forEachIndexed { idx, tile ->
+                                // Wiederholungen sind leicht ausgeblichen
+                                val fade = if (idx == 0) 1f else 0.5f
                                 val left = (tile.startBar * barPx - scroll).toFloat()
                                 val width = (tile.lengthBar * barPx).toFloat()
-                                if (left + width < 0f || left > w) return@forEach
+                                if (left + width < 0f || left > w) return@forEachIndexed
                                 drawRoundRect(
-                                    color,
+                                    color.copy(alpha = fade),
                                     Offset(left, top),
                                     Size(maxOf(width - gap, 1f), clipH),
                                     CornerRadius(12.dp.toPx())
                                 )
-                                if (t.type != TrackType.AUDIO) {
-                                    val spacing = 1.0 / tile.stretch
-                                    if (barPx * spacing / 4.0 >= 8.dp.toPx()) {
-                                        val off = if (t.type == TrackType.HIHAT) 0.5 else 0.0
-                                        var k = ceil(tile.startBar * 4.0 / spacing - off - 1e-9)
-                                        while ((k + off) * spacing / 4.0 < tile.endBar - 1e-9) {
-                                            val hx = ((k + off) * spacing / 4.0 * barPx - scroll).toFloat()
-                                            drawRoundRect(
-                                                tickColor,
-                                                Offset(hx - 2.dp.toPx(), y + 24.dp.toPx()),
-                                                Size(4.dp.toPx(), rowH - 48.dp.toPx()),
-                                                CornerRadius(2.dp.toPx())
-                                            )
-                                            k += 1.0
-                                        }
+                                if (isPattern) {
+                                    // gesetzte Felder der Musikrolle als kleine Striche
+                                    val cellBars = 1.0 / (16.0 * tile.stretch)
+                                    val cellPx = (cellBars * barPx).toFloat()
+                                    val bandH = (clipH - 16.dp.toPx()) / laneCount
+                                    val tw = maxOf(2.dp.toPx(), cellPx * 0.7f)
+                                    for (code in tile.pattern) {
+                                        val lane = code / CELL_BASE
+                                        val cell = code % CELL_BASE
+                                        if (lane >= laneCount) continue
+                                        val pos = tile.startBar + cell * cellBars
+                                        if (pos >= tile.endBar - 1e-9) continue
+                                        val hx = (pos * barPx - scroll).toFloat()
+                                        if (hx + tw < 0f || hx > w) continue
+                                        drawRoundRect(
+                                            tickColor.copy(alpha = fade),
+                                            Offset(hx, top + 8.dp.toPx() + lane * bandH + bandH * 0.15f),
+                                            Size(tw, bandH * 0.7f),
+                                            CornerRadius(2.dp.toPx())
+                                        )
                                     }
                                 } else {
                                     val data = tile.sourceFile?.let { peaks[it] }
@@ -573,12 +591,12 @@ fun Timeline(
                                         while (x < x1) {
                                             val barInTile = (x - left) / barPx
                                             val sec = (tile.offsetBar + barInTile) * secondsPerBar * speed
-                                            val idx = (sec * AudioImport.PEAKS_PER_SECOND).toInt()
-                                            if (idx >= 0 && idx < data.size) {
-                                                val amp = (data[idx].toInt() and 0xFF) / 255f
+                                            val idxPeak = (sec * AudioImport.PEAKS_PER_SECOND).toInt()
+                                            if (idxPeak >= 0 && idxPeak < data.size) {
+                                                val amp = (data[idxPeak].toInt() and 0xFF) / 255f
                                                 val half = maxOf(1.5.dp.toPx(), amp * clipH / 2f * 0.9f)
                                                 drawLine(
-                                                    waveColor,
+                                                    waveColor.copy(alpha = fade),
                                                     Offset(x, cy - half),
                                                     Offset(x, cy + half),
                                                     2.dp.toPx()
@@ -590,8 +608,10 @@ fun Timeline(
                                 }
                             }
 
-                            // Wiederholen-Kreis an der rechten oberen Ecke
-                            if (!state.stretchMode) {
+                            // Wiederholen-Kreis: nur am ausgewählten Block
+                            if (!state.stretchMode && c.id == editor.selectedClipId &&
+                                t.id == editor.selectedTrackId
+                            ) {
                                 drawRepeatBadge(
                                     Offset((c.endBar * barPx - scroll).toFloat(), top),
                                     11.dp.toPx(),
@@ -759,13 +779,13 @@ private fun TrackBadge(track: Track, selected: Boolean) {
     val ringColor = when {
         track.muted -> Color(0xFF9E9E9E)
         track.type == TrackType.AUDIO -> Color(0xFFFFE600)
-        track.type == TrackType.DRUM -> Color(0xFFA820A8)
+        track.type == TrackType.EFFECT -> Color(0xFFE6208F)
         else -> Color(0xFF00FFF0)
     }
     val glowColor = when {
         track.muted -> Color(0xFFBDBDBD)
         track.type == TrackType.AUDIO -> Color(0xFFFFE600)
-        track.type == TrackType.DRUM -> Color(0xFFFF8CFF)
+        track.type == TrackType.EFFECT -> Color(0xFFFF8FCB)
         else -> Color(0xFF4DA3FF)
     }
     val grayFilter = if (track.muted) {
@@ -798,14 +818,14 @@ private fun TrackBadge(track: Track, selected: Boolean) {
                     fontSize = 22.sp,
                     modifier = Modifier.alpha(if (track.muted) 0.4f else 1f)
                 )
-                TrackType.DRUM -> Image(
+                TrackType.EFFECT -> Image(
                     painter = painterResource(R.drawable.ic_drum),
                     contentDescription = null,
                     colorFilter = grayFilter,
                     modifier = Modifier.size(28.dp)
                 )
-                TrackType.HIHAT -> Image(
-                    painter = painterResource(R.drawable.ic_hihat),
+                TrackType.SYNTH -> Image(
+                    painter = painterResource(R.drawable.ic_keyboard),
                     contentDescription = null,
                     colorFilter = grayFilter,
                     modifier = Modifier.size(28.dp)
