@@ -6,7 +6,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.util.UUID
 import kotlin.math.abs
-import kotlin.math.floor
+import kotlin.math.roundToInt
 
 class ProjectEditor(
     initial: Project,
@@ -34,6 +34,9 @@ class ProjectEditor(
 
     private val undoStack = ArrayList<List<Track>>()
     private val redoStack = ArrayList<List<Track>>()
+
+    /** Zustand vor den Änderungen in der Musikrolle (alle Änderungen einer Sitzung sind ein Schritt). */
+    private var patternBase: List<Track>? = null
 
     val tracks: List<Track> get() = project.tracks
 
@@ -88,14 +91,13 @@ class ProjectEditor(
         update(project.copy(tracks = tracks.map { if (it.id == trackId) it.copy(name = name) else it }))
     }
 
+    /** Schaltet alle ausgewählten Zeilen stumm (oder wieder laut). Steht im Rückgängig-Verlauf. */
     fun toggleMute() {
         val selected = tracks.filter { it.id in selectedTrackIds }
         if (selected.isEmpty()) return
         val mute = !selected.all { it.muted }
-        update(
-            project.copy(
-                tracks = tracks.map { if (it.id in selectedTrackIds) it.copy(muted = mute) else it }
-            )
+        commitTracks(
+            tracks.map { if (it.id in selectedTrackIds) it.copy(muted = mute) else it }
         )
     }
 
@@ -123,6 +125,7 @@ class ProjectEditor(
                 t.copy(bpm = r2, clips = rescale(t.clips, factor))
             }
         }
+        patternBase = null
         undoStack.clear()
         redoStack.clear()
         refreshFlags()
@@ -138,6 +141,7 @@ class ProjectEditor(
                 t
             }
         }
+        patternBase = null
         undoStack.clear()
         redoStack.clear()
         refreshFlags()
@@ -146,12 +150,12 @@ class ProjectEditor(
 
     // ---------- Blöcke und Zeilen ----------
 
-    fun addDrumClip() {
-        insertClip(TrackType.DRUM, Clip(UUID.randomUUID().toString(), cursorBar, 1.0))
-    }
-
-    fun addHihatClip() {
-        insertClip(TrackType.HIHAT, Clip(UUID.randomUUID().toString(), cursorBar, 1.0))
+    /** Legt einen leeren Effekt- oder Synth-Block (1 Takt) am Cursor an und wählt ihn aus. */
+    fun addPatternClip(type: TrackType) {
+        val clip = Clip(UUID.randomUUID().toString(), cursorBar, 1.0)
+        val trackId = insertClip(type, clip)
+        selectedTrackIds = listOf(trackId)
+        selectedClipId = clip.id
     }
 
     fun addAudioClip(
@@ -180,14 +184,20 @@ class ProjectEditor(
         commitTracks(newTracks)
     }
 
-    fun insertClip(type: TrackType, clip: Clip) {
+    /** Fügt einen Block in die ausgewählte Zeile gleicher Art oder in eine neue Zeile ein. Gibt die Zeilen-ID zurück. */
+    fun insertClip(type: TrackType, clip: Clip): String {
         val selected = tracks.firstOrNull { it.id == selectedTrackId }
+        val targetId: String
         val newTracks = if (selected != null && selected.type == type) {
+            targetId = selected.id
             tracks.map { if (it.id == selected.id) it.copy(clips = overwrite(it.clips, clip)) else it }
         } else {
-            tracks + Track(UUID.randomUUID().toString(), type, listOf(clip))
+            val newId = UUID.randomUUID().toString()
+            targetId = newId
+            tracks + Track(newId, type, listOf(clip))
         }
         commitTracks(newTracks)
+        return targetId
     }
 
     fun replaceClip(trackId: String, newClip: Clip) {
@@ -205,7 +215,7 @@ class ProjectEditor(
     /** Hängt an den Block genau eine weitere volle Wiederholung an. */
     fun addRepeat(trackId: String, clipId: String) {
         val clip = tracks.firstOrNull { it.id == trackId }?.clips?.firstOrNull { it.id == clipId } ?: return
-        replaceClip(trackId, clip.copy(repeats = floor(clip.repeats + 1e-6) + 1.0))
+        replaceClip(trackId, clip.copy(repeatCount = clip.repeatCount + 1, repeatPartial = 0.0))
     }
 
     /** Teilt den ausgewählten Block am Cursor. Gibt eine Fehlermeldung zurück oder null. */
@@ -215,12 +225,16 @@ class ProjectEditor(
         val cursor = cursorBar
         val target = tiles.firstOrNull { cursor > it.startBar + 1e-6 && cursor < it.endBar - 1e-6 }
             ?: return "Der Cursor muss im ausgewählten Block stehen"
-        val left = target.copy(lengthBar = cursor - target.startBar)
+
+        val k = ((cursor - target.startBar) * 16.0 * target.stretch).roundToInt()
+        val (leftPattern, rightPattern) = splitPattern(target.pattern, k)
+        val left = target.copy(lengthBar = cursor - target.startBar, pattern = leftPattern)
         val right = target.copy(
             id = UUID.randomUUID().toString(),
             startBar = cursor,
             lengthBar = target.endBar - cursor,
-            offsetBar = target.offsetBar + (cursor - target.startBar)
+            offsetBar = target.offsetBar + (cursor - target.startBar),
+            pattern = rightPattern
         )
         val parts = tiles.flatMap { if (it.id == target.id) listOf(left, right) else listOf(it) }
         commitTracks(
@@ -236,6 +250,17 @@ class ProjectEditor(
         return null
     }
 
+    private fun splitPattern(p: Set<Int>, k: Int): Pair<Set<Int>, Set<Int>> {
+        val left = HashSet<Int>()
+        val right = HashSet<Int>()
+        for (code in p) {
+            val lane = code / CELL_BASE
+            val cell = code % CELL_BASE
+            if (cell < k) left.add(code) else right.add(lane * CELL_BASE + (cell - k))
+        }
+        return Pair(left, right)
+    }
+
     fun toggleClipMute() {
         val (track, clip) = selectedBlock() ?: return
         commitTracks(
@@ -249,6 +274,43 @@ class ProjectEditor(
         )
     }
 
+    /** Schaltet ein Feld der Musikrolle um. Gibt zurück, ob es jetzt gesetzt ist. */
+    fun togglePatternCell(trackId: String, clipId: String, lane: Int, cell: Int): Boolean {
+        if (patternBase == null) patternBase = project.tracks
+        val code = lane * CELL_BASE + cell
+        var nowOn = false
+        val newTracks = tracks.map { t ->
+            if (t.id != trackId) {
+                t
+            } else {
+                t.copy(
+                    clips = t.clips.map { c ->
+                        if (c.id != clipId) {
+                            c
+                        } else {
+                            nowOn = code !in c.pattern
+                            c.copy(pattern = if (nowOn) c.pattern + code else c.pattern - code)
+                        }
+                    }
+                )
+            }
+        }
+        applyTracks(newTracks)
+        return nowOn
+    }
+
+    /** Beendet die Bearbeitung in der Musikrolle: alles davor zählt als ein Rückgängig-Schritt. */
+    fun endPatternEdit() {
+        val base = patternBase ?: return
+        patternBase = null
+        if (base != project.tracks) {
+            undoStack.add(base)
+            if (undoStack.size > 100) undoStack.removeAt(0)
+            redoStack.clear()
+            refreshFlags()
+        }
+    }
+
     /** Fügt den kopierten Block am Cursor ein (die Audiodatei muss schon im Projekt liegen). */
     fun pasteClip(entry: ClipboardEntry) {
         val isAudio = entry.type == TrackType.AUDIO
@@ -259,7 +321,8 @@ class ProjectEditor(
             startBar = cursorBar,
             lengthBar = c.lengthBar * scale,
             offsetBar = c.offsetBar * scale,
-            sourceLengthBar = c.sourceLengthBar * scale
+            sourceLengthBar = c.sourceLengthBar * scale,
+            repeatPartial = c.repeatPartial * scale
         )
         val selected = tracks.firstOrNull { it.id == selectedTrackId }
         val join = selected != null && selected.type == entry.type &&
@@ -310,6 +373,7 @@ class ProjectEditor(
     }
 
     fun undo() {
+        endPatternEdit()
         if (undoStack.isEmpty()) return
         redoStack.add(project.tracks)
         applyTracks(withCurrentMeta(undoStack.removeAt(undoStack.lastIndex)))
@@ -318,6 +382,7 @@ class ProjectEditor(
     }
 
     fun redo() {
+        endPatternEdit()
         if (redoStack.isEmpty()) return
         undoStack.add(project.tracks)
         applyTracks(withCurrentMeta(redoStack.removeAt(redoStack.lastIndex)))
@@ -327,10 +392,11 @@ class ProjectEditor(
 
     // ---------- intern ----------
 
+    /** Beim Rückgängig-Machen bleiben Zeilenname und Lautstärke, wie sie gerade sind. */
     private fun withCurrentMeta(snapshot: List<Track>): List<Track> =
         snapshot.map { s ->
             val current = tracks.firstOrNull { it.id == s.id }
-            if (current != null) s.copy(name = current.name, muted = current.muted, volume = current.volume) else s
+            if (current != null) s.copy(name = current.name, volume = current.volume) else s
         }
 
     private fun durationFor(list: List<Track>, bpm: Int): Long {
@@ -345,7 +411,8 @@ class ProjectEditor(
             val scaled = c.copy(
                 lengthBar = c.lengthBar * factor,
                 offsetBar = c.offsetBar * factor,
-                sourceLengthBar = c.sourceLengthBar * factor
+                sourceLengthBar = c.sourceLengthBar * factor,
+                repeatPartial = c.repeatPartial * factor
             )
             result = overwrite(result, scaled)
         }
@@ -363,7 +430,7 @@ class ProjectEditor(
                 continue
             }
             // überschriebene Wiederholungen werden zu einzelnen Blöcken
-            val parts = if (original.repeats > 1e-9) original.tiles(true) else listOf(original)
+            val parts = if (original.repeatCount > 0) original.tiles(true) else listOf(original)
             for (c in parts) {
                 if (c.endBar <= s || c.startBar >= e) {
                     result.add(c)
@@ -373,12 +440,19 @@ class ProjectEditor(
                     result.add(c.copy(lengthBar = s - c.startBar))
                 }
                 if (c.endBar > e) {
+                    val cut = e - c.startBar
+                    val rightPattern = if (c.pattern.isEmpty()) {
+                        c.pattern
+                    } else {
+                        splitPattern(c.pattern, (cut * 16.0 * c.stretch).roundToInt()).second
+                    }
                     result.add(
                         c.copy(
                             id = if (c.startBar < s) UUID.randomUUID().toString() else c.id,
                             startBar = e,
                             lengthBar = c.endBar - e,
-                            offsetBar = c.offsetBar + (e - c.startBar)
+                            offsetBar = c.offsetBar + cut,
+                            pattern = rightPattern
                         )
                     )
                 }
@@ -389,6 +463,7 @@ class ProjectEditor(
     }
 
     private fun commitTracks(newTracks: List<Track>) {
+        endPatternEdit()
         undoStack.add(project.tracks)
         if (undoStack.size > 100) undoStack.removeAt(0)
         redoStack.clear()
