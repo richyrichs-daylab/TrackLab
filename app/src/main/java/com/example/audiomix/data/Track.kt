@@ -5,9 +5,18 @@ import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.min
+import kotlin.math.roundToInt
 
-enum class TrackType { AUDIO, DRUM, HIHAT }
+enum class TrackType { AUDIO, EFFECT, SYNTH }
+
+/** Felder der Musikrolle werden als Tonzeile * CELL_BASE + Feldnummer gespeichert. */
+const val CELL_BASE = 100000
+
+/** So viele Felder hat die Musikrolle eines Blocks (16 pro Takt, bei gedehnten Blöcken entsprechend). */
+fun patternCells(lengthBar: Double, stretch: Double): Int =
+    maxOf(1, (lengthBar * 16.0 * stretch).roundToInt())
 
 data class Clip(
     val id: String,
@@ -20,37 +29,51 @@ data class Clip(
     val sourceBpm: Double = 100.0,
     /** Tempo-Faktor dieses Blocks (1 = wie die Zeile, 2 = doppelt so schnell). */
     val stretch: Double = 1.0,
-    /** Wiederholungen als Vielfaches der Blocklänge (0 = keine). */
-    val repeats: Double = 0.0,
-    val muted: Boolean = false
+    /** Anzahl der angehängten Wiederholungen (Kopien). */
+    val repeatCount: Int = 0,
+    /** Länge der letzten Kopie in Takten, wenn sie kürzer ist als der Block (0 = voll). */
+    val repeatPartial: Double = 0.0,
+    val muted: Boolean = false,
+    /** Gesetzte Felder der Musikrolle (nur Effekt und Synth). */
+    val pattern: Set<Int> = emptySet()
 ) {
     /** Ende des eigentlichen Blocks (ohne Wiederholungen). */
     val tileEnd: Double get() = startBar + lengthBar
 
+    /** Gesamtlänge aller Kopien. */
+    val copiesLength: Double
+        get() {
+            if (repeatCount <= 0) return 0.0
+            val last = if (repeatPartial > 0.0) min(repeatPartial, lengthBar) else lengthBar
+            return (repeatCount - 1) * lengthBar + last
+        }
+
     /** Ende inklusive aller Wiederholungen. */
-    val endBar: Double get() = startBar + lengthBar * (1.0 + repeats)
+    val endBar: Double get() = startBar + lengthBar + copiesLength
 
     fun speed(trackTempo: Double): Double = trackTempo / sourceBpm * stretch
 
-    /** Der Block und seine Wiederholungen als einzelne Teile. */
+    /** Der Block und seine Kopien als einzelne Teile (der erste ist das Original). */
     fun tiles(freshIds: Boolean = false): List<Clip> {
-        if (repeats <= 1e-9) return listOf(copy(repeats = 0.0))
         val result = ArrayList<Clip>()
-        val end = endBar
-        var i = 0
-        while (true) {
-            val s = startBar + i * lengthBar
-            val len = min(lengthBar, end - s)
-            if (len < 1e-6) break
+        result.add(copy(repeatCount = 0, repeatPartial = 0.0))
+        var s = startBar + lengthBar
+        for (i in 1..repeatCount) {
+            val len = if (i == repeatCount && repeatPartial > 0.0) {
+                min(repeatPartial, lengthBar)
+            } else {
+                lengthBar
+            }
             result.add(
                 copy(
-                    id = if (i == 0 || !freshIds) id else UUID.randomUUID().toString(),
+                    id = if (freshIds) UUID.randomUUID().toString() else id,
                     startBar = s,
                     lengthBar = len,
-                    repeats = 0.0
+                    repeatCount = 0,
+                    repeatPartial = 0.0
                 )
             )
-            i++
+            s += len
         }
         return result
     }
@@ -63,24 +86,58 @@ data class Clip(
         put("sourceLengthBar", sourceLengthBar)
         put("sourceBpm", sourceBpm)
         put("stretch", stretch)
-        put("repeats", repeats)
+        put("repeatCount", repeatCount)
+        put("repeatPartial", repeatPartial)
         put("muted", muted)
+        put("pattern", JSONArray().apply { pattern.sorted().forEach { put(it) } })
         if (sourceFile != null) put("sourceFile", sourceFile)
     }
 
     companion object {
-        fun fromJson(o: JSONObject): Clip = Clip(
-            id = o.getString("id"),
-            startBar = o.getDouble("startBar"),
-            lengthBar = o.getDouble("lengthBar"),
-            offsetBar = o.optDouble("offsetBar", 0.0),
-            sourceFile = if (o.has("sourceFile")) o.getString("sourceFile") else null,
-            sourceLengthBar = o.optDouble("sourceLengthBar", 0.0),
-            sourceBpm = o.optDouble("sourceBpm", 100.0),
-            stretch = o.optDouble("stretch", 1.0),
-            repeats = o.optDouble("repeats", 0.0),
-            muted = o.optBoolean("muted", false)
-        )
+        /** [legacyLane]: bei alten Trommel-/Hitsch-Blöcken die Tonzeile, aus der das Muster entsteht. */
+        fun fromJson(o: JSONObject, legacyLane: Int = -1): Clip {
+            val length = o.getDouble("lengthBar")
+            val stretch = o.optDouble("stretch", 1.0)
+
+            var count = o.optInt("repeatCount", 0)
+            var partial = o.optDouble("repeatPartial", 0.0)
+            if (!o.has("repeatCount") && o.has("repeats")) {
+                val r = o.optDouble("repeats", 0.0)
+                if (r > 1e-9) {
+                    count = ceil(r - 1e-9).toInt()
+                    val last = r - (count - 1)
+                    partial = if (last >= 1.0 - 1e-6) 0.0 else last * length
+                }
+            }
+
+            val pattern = HashSet<Int>()
+            val array = o.optJSONArray("pattern")
+            if (array != null) {
+                for (i in 0 until array.length()) pattern.add(array.getInt(i))
+            } else if (legacyLane >= 0) {
+                val cells = patternCells(length, stretch)
+                var k = if (legacyLane == 1) 2 else 0
+                while (k < cells) {
+                    pattern.add(legacyLane * CELL_BASE + k)
+                    k += 4
+                }
+            }
+
+            return Clip(
+                id = o.getString("id"),
+                startBar = o.getDouble("startBar"),
+                lengthBar = length,
+                offsetBar = o.optDouble("offsetBar", 0.0),
+                sourceFile = if (o.has("sourceFile")) o.getString("sourceFile") else null,
+                sourceLengthBar = o.optDouble("sourceLengthBar", 0.0),
+                sourceBpm = o.optDouble("sourceBpm", 100.0),
+                stretch = stretch,
+                repeatCount = count,
+                repeatPartial = partial,
+                muted = o.optBoolean("muted", false),
+                pattern = pattern
+            )
+        }
     }
 }
 
@@ -109,14 +166,25 @@ data class Track(
 
     companion object {
         fun fromJson(o: JSONObject): Track {
+            val typeName = o.getString("type")
+            // Alte Projekte: Trommel und Hitsch sind jetzt Effekt-Zeilen
+            val type = when (typeName) {
+                "DRUM", "HIHAT" -> TrackType.EFFECT
+                else -> TrackType.valueOf(typeName)
+            }
+            val legacyLane = when (typeName) {
+                "DRUM" -> 0
+                "HIHAT" -> 1
+                else -> -1
+            }
             val array = o.getJSONArray("clips")
             val clips = ArrayList<Clip>()
             for (i in 0 until array.length()) {
-                clips.add(Clip.fromJson(array.getJSONObject(i)))
+                clips.add(Clip.fromJson(array.getJSONObject(i), legacyLane))
             }
             return Track(
                 id = o.getString("id"),
-                type = TrackType.valueOf(o.getString("type")),
+                type = type,
                 clips = clips,
                 name = if (o.has("name")) o.getString("name") else null,
                 bpm = o.optDouble("bpm", 0.0),
