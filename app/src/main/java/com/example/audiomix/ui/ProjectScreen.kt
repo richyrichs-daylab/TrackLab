@@ -4,6 +4,13 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -47,10 +54,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -78,6 +89,8 @@ import com.example.audiomix.data.MixPlayer
 import com.example.audiomix.data.MixRenderer
 import com.example.audiomix.data.Project
 import com.example.audiomix.data.ProjectEditor
+import com.example.audiomix.data.SoundPreview
+import com.example.audiomix.data.Sounds
 import com.example.audiomix.data.StretchFiles
 import com.example.audiomix.data.TrackType
 import com.example.audiomix.data.formatBpm
@@ -88,6 +101,46 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** Holografischer Glanz: ein schräger Streifen (45°) fährt immer wieder von links nach rechts. */
+@Composable
+private fun HoloShine(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "holo")
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1800, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "holoProgress"
+    )
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val band = w * 0.45f
+        val travel = w + band + h
+        val x0 = -band - h + progress * travel
+        val path = Path().apply {
+            moveTo(x0, h)
+            lineTo(x0 + band, h)
+            lineTo(x0 + band + h, 0f)
+            lineTo(x0 + h, 0f)
+            close()
+        }
+        val brush = Brush.linearGradient(
+            0f to Color.Transparent,
+            0.2f to Color(0x66FF9CE6),
+            0.4f to Color(0x6666F0FF),
+            0.6f to Color(0x66FFF59A),
+            0.8f to Color(0x66B79CFF),
+            1f to Color.Transparent,
+            start = Offset(x0, 0f),
+            end = Offset(x0 + band + h, 0f)
+        )
+        drawPath(path, brush)
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -110,6 +163,7 @@ fun ProjectScreen(
 
     val selectedRows = editor.tracks.withIndex().filter { it.value.id in editor.selectedTrackIds }
     val selectedBlock = editor.selectedBlock()
+    val patternBlock = selectedBlock?.takeIf { it.first.type != TrackType.AUDIO }
 
     var editingName by remember { mutableStateOf(false) }
     var nameText by remember(editingName) {
@@ -134,8 +188,21 @@ fun ProjectScreen(
     var pendingBar by remember { mutableDoubleStateOf(0.0) }
     var volumeOpen by remember { mutableStateOf(false) }
 
+    /** Der Block, dessen Musikrolle gerade offen ist (null = keine Rolle offen). */
+    var rollClipId by remember { mutableStateOf<String?>(null) }
+    val rollOpen = rollClipId != null && rollClipId == editor.selectedClipId && patternBlock != null
+
     LaunchedEffect(selectedRows.isEmpty()) {
         if (selectedRows.isEmpty()) volumeOpen = false
+    }
+
+    // Die Musikrolle schließt sich, wenn ein anderer Block gewählt wird
+    LaunchedEffect(editor.selectedClipId) {
+        val open = rollClipId
+        if (open != null && open != editor.selectedClipId) {
+            rollClipId = null
+            editor.endPatternEdit()
+        }
     }
 
     // Dehnen-Modus endet, wenn sich die Auswahl ändert
@@ -157,13 +224,15 @@ fun ProjectScreen(
     var importTarget by remember { mutableDoubleStateOf(100.0) }
 
     DisposableEffect(Unit) {
-        onDispose { player.stop() }
+        onDispose {
+            editor.endPatternEdit()
+            player.stop()
+        }
     }
 
     fun speedRangeOk(targetBpm: Double, sourceBpm: Double): Boolean =
         targetBpm / sourceBpm in 0.25..4.0
 
-    /** Welche Tempi für diese Audio-Blöcke möglich sind (Faktor 4 in beide Richtungen). */
     fun tempoRange(clips: List<Clip>): Pair<Double, Double> = Pair(
         clips.maxOf { it.sourceBpm * 0.25 / it.stretch },
         clips.minOf { it.sourceBpm * 4.0 / it.stretch }
@@ -493,41 +562,445 @@ fun ProjectScreen(
 
     val division = timeline.division(density)
     val gridLabel = if (division == 1) "1" else "1/$division"
+    val line = Modifier.fillMaxWidth().height(1.dp).background(Color.Gray.copy(alpha = 0.6f))
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.background)
-            .systemBarsPadding()
-    ) {
-        // ---- Titelzeile ----
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, end = 8.dp, top = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(modifier = Modifier.weight(1f).padding(end = 8.dp), contentAlignment = Alignment.Center) {
-                if (editingName) {
-                    BasicTextField(
-                        value = nameText,
-                        onValueChange = { nameText = it },
-                        singleLine = true,
-                        textStyle = TextStyle(
+    Box(modifier = Modifier.fillMaxSize().background(colors.background)) {
+
+        Column(modifier = Modifier.fillMaxSize().systemBarsPadding()) {
+            // ---- Titelzeile ----
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 8.dp, top = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(modifier = Modifier.weight(1f).padding(end = 8.dp), contentAlignment = Alignment.Center) {
+                    if (editingName) {
+                        BasicTextField(
+                            value = nameText,
+                            onValueChange = { nameText = it },
+                            singleLine = true,
+                            textStyle = TextStyle(
+                                color = colors.onBackground,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Black,
+                                textAlign = TextAlign.Center
+                            ),
+                            cursorBrush = SolidColor(colors.onBackground),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = {
+                                editingName = false
+                                editor.rename(nameText.text)
+                            }),
+                            modifier = Modifier.fillMaxWidth().focusRequester(focus)
+                        )
+                    } else {
+                        Text(
+                            text = editor.project.name,
                             color = colors.onBackground,
                             fontSize = 20.sp,
+                            lineHeight = 24.sp,
                             fontWeight = FontWeight.Black,
-                            textAlign = TextAlign.Center
-                        ),
-                        cursorBrush = SolidColor(colors.onBackground),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(onDone = {
-                            editingName = false
-                            editor.rename(nameText.text)
-                        }),
-                        modifier = Modifier.fillMaxWidth().focusRequester(focus)
-                    )
+                            textAlign = TextAlign.Center,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.combinedClickable(
+                                onClick = {},
+                                onLongClick = { editingName = true }
+                            )
+                        )
+                    }
+                }
+
+                // Export-Format
+                Box {
+                    PillButton(text = exportFormat.label, onClick = { formatMenu = true })
+                    DropdownMenu(expanded = formatMenu, onDismissRequest = { formatMenu = false }) {
+                        ExportFormat.values().filter { it != exportFormat }.forEach { f ->
+                            DropdownMenuItem(
+                                text = { Text(f.label) },
+                                onClick = {
+                                    formatMenu = false
+                                    onExportFormatChange(f)
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Text(
+                    text = "↑",
+                    color = colors.onBackground,
+                    fontSize = 40.sp,
+                    modifier = Modifier.clickable(onClick = onClose).padding(8.dp)
+                )
+            }
+
+            // ---- Steuerzeile ----
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "<",
+                    color = colors.onBackground.copy(alpha = if (editor.canUndo) 1f else 0.25f),
+                    fontSize = 36.sp,
+                    fontWeight = FontWeight.Black,
+                    modifier = Modifier
+                        .clickable(enabled = editor.canUndo) { editor.undo() }
+                        .padding(horizontal = 8.dp)
+                )
+                Text(
+                    text = ">",
+                    color = colors.onBackground.copy(alpha = if (editor.canRedo) 1f else 0.25f),
+                    fontSize = 36.sp,
+                    fontWeight = FontWeight.Black,
+                    modifier = Modifier
+                        .clickable(enabled = editor.canRedo) { editor.redo() }
+                        .padding(horizontal = 8.dp)
+                )
+                Text(
+                    text = gridLabel,
+                    color = colors.onBackground,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Black
+                )
+                Spacer(Modifier.weight(1f))
+
+                if (editingBpm) {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color.Black)
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        BasicTextField(
+                            value = bpmText,
+                            onValueChange = { v ->
+                                if (v.text.length <= 3 && v.text.all { it.isDigit() }) bpmText = v
+                            },
+                            singleLine = true,
+                            textStyle = TextStyle(
+                                color = Color(0xFFE8607A),
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Black
+                            ),
+                            cursorBrush = SolidColor(Color(0xFFE8607A)),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Number,
+                                imeAction = ImeAction.Done
+                            ),
+                            keyboardActions = KeyboardActions(onDone = { commitBpmField() }),
+                            modifier = Modifier.width(40.dp).focusRequester(bpmFocus)
+                        )
+                        Text(
+                            text = " bpm",
+                            color = Color(0xFFE8607A),
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Black
+                        )
+                    }
                 } else {
+                    PillButton(
+                        text = "${editor.project.bpm} bpm",
+                        onClick = { editingBpm = true },
+                        onLongClick = { editingBpm = true }
+                    )
+                }
+
+                PillButton(text = "ex.", onClick = { runExport(editor.project) })
+
+                Box {
+                    PlaceholderButton(label = "+", size = 44.dp, onClick = { plusMenu = true })
+                    DropdownMenu(expanded = plusMenu, onDismissRequest = { plusMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Datei") },
+                            onClick = {
+                                plusMenu = false
+                                pendingBar = editor.cursorBar
+                                picker.launch(arrayOf("audio/*", "application/ogg"))
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Effekt") },
+                            onClick = {
+                                plusMenu = false
+                                editor.addPatternClip(TrackType.EFFECT)
+                                rollClipId = editor.selectedClipId
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Synth") },
+                            onClick = {
+                                plusMenu = false
+                                editor.addPatternClip(TrackType.SYNTH)
+                                rollClipId = editor.selectedClipId
+                            }
+                        )
+                        val copied = BlockClipboard.entry
+                        DropdownMenuItem(
+                            text = { Text(if (copied != null) "kopierter Block" else "keine Kopie vorhanden") },
+                            enabled = copied != null,
+                            onClick = {
+                                plusMenu = false
+                                if (copied != null) pasteBlock(copied)
+                            }
+                        )
+                    }
+                }
+            }
+
+            // ---- Zeitleiste ----
+            Timeline(
+                editor = editor,
+                state = timeline,
+                peaks = peaks,
+                modifier = Modifier.weight(1f)
+            )
+
+            // ---- Unterer Bereich ----
+            Column(modifier = Modifier.fillMaxWidth().background(colors.timelineBg)) {
+
+                // Musikrolle (Effekt und Synth)
+                if (rollOpen && patternBlock != null) {
+                    val rollTrack = patternBlock.first
+                    val rollClip = patternBlock.second
+                    PatternRoll(
+                        type = rollTrack.type,
+                        clip = rollClip,
+                        muted = rollTrack.muted || rollClip.muted,
+                        onToggle = { lane, cell ->
+                            val on = editor.togglePatternCell(rollTrack.id, rollClip.id, lane, cell)
+                            if (on) SoundPreview.play(Sounds.lane(rollTrack.type, lane))
+                        }
+                    )
+                    Box(line)
+                }
+
+                if (selectedRows.isNotEmpty()) {
+                    // Block-Werkzeuge (nur bei einem ausgewählten Block)
+                    if (selectedBlock != null) {
+                        BlockToolsBar(
+                            stretchMode = timeline.stretchMode,
+                            clipMuted = selectedBlock.second.muted,
+                            onMute = { editor.toggleClipMute() },
+                            onSplit = {
+                                val error = editor.splitSelectedClip()
+                                if (error != null) Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+                            },
+                            onCopy = { copyBlock(false) },
+                            onCut = { copyBlock(true) },
+                            onStretch = { timeline.stretchMode = true },
+                            onStretchCancel = { cancelStretch() },
+                            onStretchConfirm = { confirmStretch() }
+                        )
+                        Box(line)
+                    }
+
+                    // Lautstärke-Regler
+                    if (volumeOpen) {
+                        Box(Modifier.fillMaxWidth().background(colors.rowBg)) {
+                            VolumeSlider(
+                                percent = selectedRows[0].value.volume,
+                                onChange = { editor.setVolume(it) }
+                            )
+                        }
+                        Box(line)
+                    }
+
+                    // Name/BPM-Zeile oder (bei mehreren Zeilen) schmale Lautstärke-Leiste
+                    if (selectedRows.size == 1) {
+                        val row = selectedRows[0].value
+                        RowInfoBar(
+                            trackId = row.id,
+                            name = row.displayName(selectedRows[0].index),
+                            bpmText = formatBpm(row.tempo(editor.project.bpm)),
+                            bpmEditable = row.type == TrackType.AUDIO,
+                            volumeActive = volumeOpen,
+                            onVolume = { volumeOpen = !volumeOpen },
+                            onRename = { editor.renameTrack(row.id, it) },
+                            onBpmCommit = { commitRowBpm(row.id, it) },
+                            onBpmLocked = {
+                                Toast.makeText(context, "Effekt und Synth folgen immer dem Projekt-Tempo", Toast.LENGTH_SHORT).show()
+                            },
+                            onDuplicate = { editor.duplicateTrack(row.id) }
+                        )
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(colors.rowBg)
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_speaker),
+                                contentDescription = "Lautstärke",
+                                tint = if (volumeOpen) Color(0xFFE8607A) else colors.onBackground,
+                                modifier = Modifier.size(28.dp).clickable { volumeOpen = !volumeOpen }
+                            )
+                            Text(
+                                text = "  ${selectedRows.size} Zeilen ausgewählt",
+                                color = colors.onBackground,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                // Papierkorb, Play/Pause, Bearbeiten, Stummschalten
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(150.dp)
+                        .pointerInput(Unit) {
+                            detectTapGestures {
+                                if (editor.selectedTrackIds.size == 1) editor.clearSelection()
+                            }
+                        }
+                ) {
+                    if (selectedRows.isNotEmpty()) {
+                        Text(
+                            text = "🗑️",
+                            fontSize = 44.sp,
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .padding(start = 24.dp)
+                                .clickable { editor.deleteSelection() }
+                                .padding(8.dp)
+                        )
+                        val allMuted = selectedRows.all { it.value.muted }
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .padding(end = 24.dp)
+                                .clickable { editor.toggleMute() }
+                                .padding(8.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_speaker_muted),
+                                contentDescription = "Stummschalten",
+                                tint = if (allMuted) Color(0xFFE8607A) else colors.onBackground,
+                                modifier = Modifier.size(44.dp)
+                            )
+                        }
+                    }
+
+                    // "Bearbeiten" öffnet und schließt die Musikrolle des ausgewählten Blocks
+                    if (patternBlock != null) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(top = 6.dp, end = 12.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(colors.rowBg)
+                                .clickable {
+                                    if (rollOpen) {
+                                        rollClipId = null
+                                        editor.endPatternEdit()
+                                    } else {
+                                        rollClipId = patternBlock.second.id
+                                    }
+                                }
+                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Text(
+                                text = "Bearbeiten",
+                                color = if (rollOpen) Color(0xFFE8607A) else colors.onBackground,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(110.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black)
+                            .clickable {
+                                if (playing) {
+                                    playing = false
+                                } else {
+                                    val end = editor.endBar()
+                                    if (end <= 0.0) {
+                                        Toast.makeText(context, "Noch kein Audio vorhanden", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        if (editor.cursorBar >= end) editor.cursorBar = 0.0
+                                        playing = true
+                                    }
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier.size(84.dp).clip(CircleShape).background(Color.White),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = if (playing) "⏸" else "▶",
+                                fontSize = 40.sp,
+                                color = if (playing) Color(0xFFFF9800) else Color(0xFFB02060)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Lade-Fenster mit Hologramm-Glanz über der ganzen Fläche ----
+        val percent = busyPercent
+        if (percent != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(colors.background.copy(alpha = 0.82f))
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                event.changes.forEach { it.consume() }
+                            }
+                        }
+                    }
+            ) {
+                HoloShine(Modifier.fillMaxSize())
+                Column(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "$percent %",
+                        color = colors.onBackground,
+                        fontSize = 48.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        text = "Beim Schließen vor dem Ende der Bearbeitung bricht die BPM-Änderung ab.",
+                        color = colors.onBackground,
+                        fontSize = 16.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 40.dp)
+                    )
+                }
+            }
+
+            // Projektname und Zurück-Pfeil bleiben oberhalb des Glanzes
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .systemBarsPadding()
+                    .padding(start = 16.dp, end = 8.dp, top = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(modifier = Modifier.weight(1f).padding(end = 8.dp), contentAlignment = Alignment.Center) {
                     Text(
                         text = editor.project.name,
                         color = colors.onBackground,
@@ -536,349 +1009,18 @@ fun ProjectScreen(
                         fontWeight = FontWeight.Black,
                         textAlign = TextAlign.Center,
                         maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.combinedClickable(
-                            onClick = {},
-                            onLongClick = { editingName = true }
-                        )
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
-            }
-
-            // Export-Format (dort, wo vorher der Lautsprecher war)
-            Box {
-                PillButton(text = exportFormat.label, onClick = { formatMenu = true })
-                DropdownMenu(expanded = formatMenu, onDismissRequest = { formatMenu = false }) {
-                    ExportFormat.values().filter { it != exportFormat }.forEach { f ->
-                        DropdownMenuItem(
-                            text = { Text(f.label) },
-                            onClick = {
-                                formatMenu = false
-                                onExportFormatChange(f)
-                            }
-                        )
-                    }
+                Box(Modifier.alpha(0f)) {
+                    PillButton(text = exportFormat.label, onClick = {})
                 }
-            }
-
-            Text(
-                text = "↑",
-                color = colors.onBackground,
-                fontSize = 40.sp,
-                modifier = Modifier.clickable(onClick = onClose).padding(8.dp)
-            )
-        }
-
-        Box(modifier = Modifier.weight(1f)) {
-            Column(modifier = Modifier.fillMaxSize()) {
-
-                // ---- Steuerzeile ----
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "<",
-                        color = colors.onBackground.copy(alpha = if (editor.canUndo) 1f else 0.25f),
-                        fontSize = 36.sp,
-                        fontWeight = FontWeight.Black,
-                        modifier = Modifier
-                            .clickable(enabled = editor.canUndo) { editor.undo() }
-                            .padding(horizontal = 8.dp)
-                    )
-                    Text(
-                        text = ">",
-                        color = colors.onBackground.copy(alpha = if (editor.canRedo) 1f else 0.25f),
-                        fontSize = 36.sp,
-                        fontWeight = FontWeight.Black,
-                        modifier = Modifier
-                            .clickable(enabled = editor.canRedo) { editor.redo() }
-                            .padding(horizontal = 8.dp)
-                    )
-                    Text(
-                        text = gridLabel,
-                        color = colors.onBackground,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Black
-                    )
-                    Spacer(Modifier.weight(1f))
-
-                    if (editingBpm) {
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(Color.Black)
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            BasicTextField(
-                                value = bpmText,
-                                onValueChange = { v ->
-                                    if (v.text.length <= 3 && v.text.all { it.isDigit() }) bpmText = v
-                                },
-                                singleLine = true,
-                                textStyle = TextStyle(
-                                    color = Color(0xFFE8607A),
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Black
-                                ),
-                                cursorBrush = SolidColor(Color(0xFFE8607A)),
-                                keyboardOptions = KeyboardOptions(
-                                    keyboardType = KeyboardType.Number,
-                                    imeAction = ImeAction.Done
-                                ),
-                                keyboardActions = KeyboardActions(onDone = { commitBpmField() }),
-                                modifier = Modifier.width(40.dp).focusRequester(bpmFocus)
-                            )
-                            Text(
-                                text = " bpm",
-                                color = Color(0xFFE8607A),
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Black
-                            )
-                        }
-                    } else {
-                        PillButton(
-                            text = "${editor.project.bpm} bpm",
-                            onClick = { editingBpm = true },
-                            onLongClick = { editingBpm = true }
-                        )
-                    }
-
-                    PillButton(text = "ex.", onClick = { runExport(editor.project) })
-
-                    Box {
-                        PlaceholderButton(label = "+", size = 44.dp, onClick = { plusMenu = true })
-                        DropdownMenu(expanded = plusMenu, onDismissRequest = { plusMenu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Dateien") },
-                                onClick = {
-                                    plusMenu = false
-                                    pendingBar = editor.cursorBar
-                                    picker.launch(arrayOf("audio/*", "application/ogg"))
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Trommel") },
-                                onClick = {
-                                    plusMenu = false
-                                    editor.addDrumClip()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Hitsch") },
-                                onClick = {
-                                    plusMenu = false
-                                    editor.addHihatClip()
-                                }
-                            )
-                            val copied = BlockClipboard.entry
-                            DropdownMenuItem(
-                                text = { Text(if (copied != null) "kopierter Block" else "keine Kopie vorhanden") },
-                                enabled = copied != null,
-                                onClick = {
-                                    plusMenu = false
-                                    if (copied != null) pasteBlock(copied)
-                                }
-                            )
-                        }
-                    }
-                }
-
-                // ---- Zeitleiste ----
-                Timeline(
-                    editor = editor,
-                    state = timeline,
-                    peaks = peaks,
-                    modifier = Modifier.weight(1f)
+                Text(
+                    text = "↑",
+                    color = colors.onBackground,
+                    fontSize = 40.sp,
+                    modifier = Modifier.clickable(onClick = onClose).padding(8.dp)
                 )
-
-                // ---- Unterer Bereich ----
-                Column(modifier = Modifier.fillMaxWidth().background(colors.timelineBg)) {
-                    if (selectedRows.isNotEmpty()) {
-                        val line = Modifier.fillMaxWidth().height(1.dp).background(Color.Gray.copy(alpha = 0.6f))
-
-                        // Block-Werkzeuge (nur bei einem ausgewählten Block)
-                        if (selectedBlock != null) {
-                            BlockToolsBar(
-                                stretchMode = timeline.stretchMode,
-                                clipMuted = selectedBlock.second.muted,
-                                onMute = { editor.toggleClipMute() },
-                                onSplit = {
-                                    val error = editor.splitSelectedClip()
-                                    if (error != null) Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
-                                },
-                                onCopy = { copyBlock(false) },
-                                onCut = { copyBlock(true) },
-                                onStretch = { timeline.stretchMode = true },
-                                onStretchCancel = { cancelStretch() },
-                                onStretchConfirm = { confirmStretch() }
-                            )
-                            Box(line)
-                        }
-
-                        // Lautstärke-Regler
-                        if (volumeOpen) {
-                            Box(Modifier.fillMaxWidth().background(colors.rowBg)) {
-                                VolumeSlider(
-                                    percent = selectedRows[0].value.volume,
-                                    onChange = { editor.setVolume(it) }
-                                )
-                            }
-                            Box(line)
-                        }
-
-                        // Name/BPM-Zeile oder (bei mehreren Zeilen) schmale Lautstärke-Leiste
-                        if (selectedRows.size == 1) {
-                            val row = selectedRows[0].value
-                            RowInfoBar(
-                                trackId = row.id,
-                                name = row.displayName(selectedRows[0].index),
-                                bpmText = formatBpm(row.tempo(editor.project.bpm)),
-                                bpmEditable = row.type == TrackType.AUDIO,
-                                volumeActive = volumeOpen,
-                                onVolume = { volumeOpen = !volumeOpen },
-                                onRename = { editor.renameTrack(row.id, it) },
-                                onBpmCommit = { commitRowBpm(row.id, it) },
-                                onBpmLocked = {
-                                    Toast.makeText(context, "Trommeln folgen immer dem Projekt-Tempo", Toast.LENGTH_SHORT).show()
-                                },
-                                onDuplicate = { editor.duplicateTrack(row.id) }
-                            )
-                        } else {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(colors.rowBg)
-                                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_speaker),
-                                    contentDescription = "Lautstärke",
-                                    tint = if (volumeOpen) Color(0xFFE8607A) else colors.onBackground,
-                                    modifier = Modifier.size(28.dp).clickable { volumeOpen = !volumeOpen }
-                                )
-                                Text(
-                                    text = "  ${selectedRows.size} Zeilen ausgewählt",
-                                    color = colors.onBackground,
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-
-                    // Papierkorb, Play/Pause, Stummschalten (Tippen auf freie Fläche wählt eine einzelne Zeile ab)
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(150.dp)
-                            .pointerInput(Unit) {
-                                detectTapGestures {
-                                    if (editor.selectedTrackIds.size == 1) editor.clearSelection()
-                                }
-                            }
-                    ) {
-                        if (selectedRows.isNotEmpty()) {
-                            Text(
-                                text = "🗑️",
-                                fontSize = 44.sp,
-                                modifier = Modifier
-                                    .align(Alignment.CenterStart)
-                                    .padding(start = 24.dp)
-                                    .clickable { editor.deleteSelection() }
-                                    .padding(8.dp)
-                            )
-                            val allMuted = selectedRows.all { it.value.muted }
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.CenterEnd)
-                                    .padding(end = 24.dp)
-                                    .clickable { editor.toggleMute() }
-                                    .padding(8.dp)
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_speaker_muted),
-                                    contentDescription = "Stummschalten",
-                                    tint = if (allMuted) Color(0xFFE8607A) else colors.onBackground,
-                                    modifier = Modifier.size(44.dp)
-                                )
-                            }
-                        }
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.Center)
-                                .size(110.dp)
-                                .clip(CircleShape)
-                                .background(Color.Black)
-                                .clickable {
-                                    if (playing) {
-                                        playing = false
-                                    } else {
-                                        val end = editor.endBar()
-                                        if (end <= 0.0) {
-                                            Toast.makeText(context, "Noch kein Audio vorhanden", Toast.LENGTH_SHORT).show()
-                                        } else {
-                                            if (editor.cursorBar >= end) editor.cursorBar = 0.0
-                                            playing = true
-                                        }
-                                    }
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Box(
-                                modifier = Modifier.size(84.dp).clip(CircleShape).background(Color.White),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = if (playing) "⏸" else "▶",
-                                    fontSize = 40.sp,
-                                    color = if (playing) Color(0xFFFF9800) else Color(0xFFB02060)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ---- Lade-Overlay ----
-            val percent = busyPercent
-            if (percent != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(colors.background.copy(alpha = 0.82f))
-                        .pointerInput(Unit) {
-                            awaitPointerEventScope {
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    event.changes.forEach { it.consume() }
-                                }
-                            }
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "$percent %",
-                            color = colors.onBackground,
-                            fontSize = 48.sp,
-                            fontWeight = FontWeight.Black
-                        )
-                        Spacer(Modifier.height(16.dp))
-                        Text(
-                            text = "Beim Schließen vor dem Ende der Bearbeitung bricht die BPM-Änderung ab.",
-                            color = colors.onBackground,
-                            fontSize = 16.sp,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(horizontal = 40.dp)
-                        )
-                    }
-                }
             }
         }
     }
