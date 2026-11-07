@@ -35,14 +35,13 @@ class ProjectEditor(
     private val undoStack = ArrayList<List<Track>>()
     private val redoStack = ArrayList<List<Track>>()
 
-    /** Zustand vor den Änderungen in der Musikrolle (alle Änderungen einer Sitzung sind ein Schritt). */
+    /** Zustand vor fortlaufenden Änderungen (Musikrolle, Ein-/Ausblenden): zusammen ein Schritt. */
     private var patternBase: List<Track>? = null
 
     val tracks: List<Track> get() = project.tracks
 
     fun endBar(): Double = tracks.flatMap { it.clips }.maxOfOrNull { it.endBar } ?: 0.0
 
-    /** Die einzeln ausgewählte Zeile samt ausgewähltem Block. */
     fun selectedBlock(): Pair<Track, Clip>? {
         val t = tracks.firstOrNull { it.id == selectedTrackId } ?: return null
         val c = t.clips.firstOrNull { it.id == selectedClipId } ?: return null
@@ -79,7 +78,7 @@ class ProjectEditor(
         selectedClipId = null
     }
 
-    // ---------- Namen, Stumm, Lautstärke ----------
+    // ---------- Namen, Stumm, Lautstärke, Effekte ----------
 
     fun rename(newName: String) {
         val name = newName.trim().ifBlank { project.name }
@@ -96,9 +95,7 @@ class ProjectEditor(
         val selected = tracks.filter { it.id in selectedTrackIds }
         if (selected.isEmpty()) return
         val mute = !selected.all { it.muted }
-        commitTracks(
-            tracks.map { if (it.id in selectedTrackIds) it.copy(muted = mute) else it }
-        )
+        commitTracks(tracks.map { if (it.id in selectedTrackIds) it.copy(muted = mute) else it })
     }
 
     fun setVolume(percent: Int) {
@@ -107,6 +104,57 @@ class ProjectEditor(
             project.copy(
                 tracks = tracks.map { if (it.id in selectedTrackIds) it.copy(volume = p) else it }
             )
+        )
+    }
+
+    /** Equalizer-Band (0 Treble, 1 Mid, 2 Bass) der ausgewählten Zeilen in dB. */
+    fun setEqGain(band: Int, db: Int) {
+        update(
+            project.copy(
+                tracks = tracks.map { t ->
+                    if (t.id in selectedTrackIds) {
+                        t.copy(eqGain = t.eqGain.toMutableList().also { it[band] = db.coerceIn(-12, 12) })
+                    } else {
+                        t
+                    }
+                }
+            )
+        )
+    }
+
+    /** Verlauf eines Bands (Einblenden und Ausblenden in Takten, bezogen auf die ganze Zeile). */
+    fun setEqFade(band: Int, fadeInBars: Double, fadeOutBars: Double) {
+        update(
+            project.copy(
+                tracks = tracks.map { t ->
+                    if (t.id in selectedTrackIds) {
+                        t.copy(
+                            eqFadeIn = t.eqFadeIn.toMutableList().also { it[band] = fadeInBars },
+                            eqFadeOut = t.eqFadeOut.toMutableList().also { it[band] = fadeOutBars }
+                        )
+                    } else {
+                        t
+                    }
+                }
+            )
+        )
+    }
+
+    /** Ein-/Ausblenden eines Blocks. Alle Änderungen bis [endPatternEdit] sind ein Rückgängig-Schritt. */
+    fun setClipFade(trackId: String, clipId: String, fadeIn: Double, fadeOut: Double) {
+        if (patternBase == null) patternBase = project.tracks
+        applyTracks(
+            tracks.map { t ->
+                if (t.id != trackId) {
+                    t
+                } else {
+                    t.copy(
+                        clips = t.clips.map {
+                            if (it.id == clipId) it.copy(fadeIn = fadeIn, fadeOut = fadeOut) else it
+                        }
+                    )
+                }
+            }
         )
     }
 
@@ -122,7 +170,12 @@ class ProjectEditor(
                 val r = t.tempo(project.bpm)
                 val r2 = if (t.id in changedRowIds) p2 else r
                 val factor = (p2 / r2) / (p / r)
-                t.copy(bpm = r2, clips = rescale(t.clips, factor))
+                t.copy(
+                    bpm = r2,
+                    clips = rescale(t.clips, factor),
+                    eqFadeIn = t.eqFadeIn.map { it * factor },
+                    eqFadeOut = t.eqFadeOut.map { it * factor }
+                )
             }
         }
         patternBase = null
@@ -136,7 +189,12 @@ class ProjectEditor(
         val newTracks = tracks.map { t ->
             if (t.id == trackId && t.type == TrackType.AUDIO) {
                 val factor = t.tempo(project.bpm) / newBpm
-                t.copy(bpm = newBpm, clips = rescale(t.clips, factor))
+                t.copy(
+                    bpm = newBpm,
+                    clips = rescale(t.clips, factor),
+                    eqFadeIn = t.eqFadeIn.map { it * factor },
+                    eqFadeOut = t.eqFadeOut.map { it * factor }
+                )
             } else {
                 t
             }
@@ -228,13 +286,14 @@ class ProjectEditor(
 
         val k = ((cursor - target.startBar) * 16.0 * target.stretch).roundToInt()
         val (leftPattern, rightPattern) = splitPattern(target.pattern, k)
-        val left = target.copy(lengthBar = cursor - target.startBar, pattern = leftPattern)
+        val left = target.copy(lengthBar = cursor - target.startBar, pattern = leftPattern, fadeOut = 0.0)
         val right = target.copy(
             id = UUID.randomUUID().toString(),
             startBar = cursor,
             lengthBar = target.endBar - cursor,
             offsetBar = target.offsetBar + (cursor - target.startBar),
-            pattern = rightPattern
+            pattern = rightPattern,
+            fadeIn = 0.0
         )
         val parts = tiles.flatMap { if (it.id == target.id) listOf(left, right) else listOf(it) }
         commitTracks(
@@ -299,7 +358,7 @@ class ProjectEditor(
         return nowOn
     }
 
-    /** Beendet die Bearbeitung in der Musikrolle: alles davor zählt als ein Rückgängig-Schritt. */
+    /** Beendet fortlaufende Änderungen: alles davor zählt als ein Rückgängig-Schritt. */
     fun endPatternEdit() {
         val base = patternBase ?: return
         patternBase = null
@@ -322,7 +381,9 @@ class ProjectEditor(
             lengthBar = c.lengthBar * scale,
             offsetBar = c.offsetBar * scale,
             sourceLengthBar = c.sourceLengthBar * scale,
-            repeatPartial = c.repeatPartial * scale
+            repeatPartial = c.repeatPartial * scale,
+            fadeIn = c.fadeIn * scale,
+            fadeOut = c.fadeOut * scale
         )
         val selected = tracks.firstOrNull { it.id == selectedTrackId }
         val join = selected != null && selected.type == entry.type &&
@@ -392,11 +453,21 @@ class ProjectEditor(
 
     // ---------- intern ----------
 
-    /** Beim Rückgängig-Machen bleiben Zeilenname und Lautstärke, wie sie gerade sind. */
+    /** Beim Rückgängig-Machen bleiben Zeilenname, Lautstärke und Effekte, wie sie gerade sind. */
     private fun withCurrentMeta(snapshot: List<Track>): List<Track> =
         snapshot.map { s ->
             val current = tracks.firstOrNull { it.id == s.id }
-            if (current != null) s.copy(name = current.name, volume = current.volume) else s
+            if (current != null) {
+                s.copy(
+                    name = current.name,
+                    volume = current.volume,
+                    eqGain = current.eqGain,
+                    eqFadeIn = current.eqFadeIn,
+                    eqFadeOut = current.eqFadeOut
+                )
+            } else {
+                s
+            }
         }
 
     private fun durationFor(list: List<Track>, bpm: Int): Long {
@@ -412,7 +483,9 @@ class ProjectEditor(
                 lengthBar = c.lengthBar * factor,
                 offsetBar = c.offsetBar * factor,
                 sourceLengthBar = c.sourceLengthBar * factor,
-                repeatPartial = c.repeatPartial * factor
+                repeatPartial = c.repeatPartial * factor,
+                fadeIn = c.fadeIn * factor,
+                fadeOut = c.fadeOut * factor
             )
             result = overwrite(result, scaled)
         }
@@ -437,7 +510,7 @@ class ProjectEditor(
                     continue
                 }
                 if (c.startBar < s) {
-                    result.add(c.copy(lengthBar = s - c.startBar))
+                    result.add(c.copy(lengthBar = s - c.startBar, fadeOut = 0.0))
                 }
                 if (c.endBar > e) {
                     val cut = e - c.startBar
@@ -452,7 +525,8 @@ class ProjectEditor(
                             startBar = e,
                             lengthBar = c.endBar - e,
                             offsetBar = c.offsetBar + cut,
-                            pattern = rightPattern
+                            pattern = rightPattern,
+                            fadeIn = 0.0
                         )
                     )
                 }
