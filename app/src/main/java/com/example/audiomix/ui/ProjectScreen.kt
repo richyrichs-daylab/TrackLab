@@ -61,7 +61,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -101,46 +100,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-/** Holografischer Glanz: ein schräger Streifen (45°) fährt immer wieder von links nach rechts. */
-@Composable
-private fun HoloShine(modifier: Modifier = Modifier) {
-    val transition = rememberInfiniteTransition(label = "holo")
-    val progress by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "holoProgress"
-    )
-    Canvas(modifier) {
-        val w = size.width
-        val h = size.height
-        val band = w * 0.45f
-        val travel = w + band + h
-        val x0 = -band - h + progress * travel
-        val path = Path().apply {
-            moveTo(x0, h)
-            lineTo(x0 + band, h)
-            lineTo(x0 + band + h, 0f)
-            lineTo(x0 + h, 0f)
-            close()
-        }
-        val brush = Brush.linearGradient(
-            0f to Color.Transparent,
-            0.2f to Color(0x66FF9CE6),
-            0.4f to Color(0x6666F0FF),
-            0.6f to Color(0x66FFF59A),
-            0.8f to Color(0x66B79CFF),
-            1f to Color.Transparent,
-            start = Offset(x0, 0f),
-            end = Offset(x0 + band + h, 0f)
-        )
-        drawPath(path, brush)
-    }
-}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -187,22 +146,32 @@ fun ProjectScreen(
     var formatMenu by remember { mutableStateOf(false) }
     var pendingBar by remember { mutableDoubleStateOf(0.0) }
     var volumeOpen by remember { mutableStateOf(false) }
-
-    /** Der Block, dessen Musikrolle gerade offen ist (null = keine Rolle offen). */
-    var rollClipId by remember { mutableStateOf<String?>(null) }
-    val rollOpen = rollClipId != null && rollClipId == editor.selectedClipId && patternBlock != null
+    var rollOpen by remember { mutableStateOf(false) }
+    var fadeOpen by remember { mutableStateOf(false) }
+    var effectsOpen by remember { mutableStateOf(false) }
+    var eqVerlauf by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(selectedRows.isEmpty()) {
-        if (selectedRows.isEmpty()) volumeOpen = false
+        if (selectedRows.isEmpty()) {
+            volumeOpen = false
+            effectsOpen = false
+            eqVerlauf = null
+        }
     }
 
-    // Die Musikrolle schließt sich, wenn ein anderer Block gewählt wird
-    LaunchedEffect(editor.selectedClipId) {
-        val open = rollClipId
-        if (open != null && open != editor.selectedClipId) {
-            rollClipId = null
-            editor.endPatternEdit()
-        }
+    // Ohne ausgewählten Block gibt es keine Ein-/Ausblenden-Zeile
+    LaunchedEffect(selectedBlock == null) {
+        if (selectedBlock == null) fadeOpen = false
+    }
+
+    // Ohne ausgewählten Effekt-/Synth-Block gibt es keine Musikrolle
+    LaunchedEffect(patternBlock == null) {
+        if (patternBlock == null) rollOpen = false
+    }
+
+    // Beim Schließen der Rolle zählen alle Änderungen darin als ein Rückgängig-Schritt
+    LaunchedEffect(rollOpen) {
+        if (!rollOpen) editor.endPatternEdit()
     }
 
     // Dehnen-Modus endet, wenn sich die Auswahl ändert
@@ -214,8 +183,8 @@ fun ProjectScreen(
         }
     }
 
-    // Stumm, Lautstärke und Block-Stumm wirken auch während des Abspielens
-    val mixKey = editor.tracks.map { t -> Triple(t.muted, t.volume, t.clips.map { it.muted }) }
+    // Stumm, Lautstärke, Block-Stumm und Equalizer-Regler wirken auch während des Abspielens
+    val mixKey = editor.tracks.map { t -> listOf(t.muted, t.volume, t.clips.map { it.muted }, t.eqGain) }
 
     var busyPercent by remember { mutableStateOf<Int?>(null) }
     var bpmQuestion by remember { mutableStateOf<Int?>(null) }
@@ -224,10 +193,7 @@ fun ProjectScreen(
     var importTarget by remember { mutableDoubleStateOf(100.0) }
 
     DisposableEffect(Unit) {
-        onDispose {
-            editor.endPatternEdit()
-            player.stop()
-        }
+        onDispose { player.stop() }
     }
 
     fun speedRangeOk(targetBpm: Double, sourceBpm: Double): Boolean =
@@ -562,59 +528,68 @@ fun ProjectScreen(
 
     val division = timeline.division(density)
     val gridLabel = if (division == 1) "1" else "1/$division"
-    val line = Modifier.fillMaxWidth().height(1.dp).background(Color.Gray.copy(alpha = 0.6f))
 
-    Box(modifier = Modifier.fillMaxSize().background(colors.background)) {
-
-        Column(modifier = Modifier.fillMaxSize().systemBarsPadding()) {
-            // ---- Titelzeile ----
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 8.dp, top = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
+    // ---- Titelzeile: wird zweimal gebaut, damit Name und Pfeil über dem Lade-Glanz liegen können ----
+    @Composable
+    fun TitleRow(topLayer: Boolean) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 8.dp, top = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier.weight(1f).padding(end = 8.dp),
+                contentAlignment = Alignment.Center
             ) {
-                Box(modifier = Modifier.weight(1f).padding(end = 8.dp), contentAlignment = Alignment.Center) {
-                    if (editingName) {
-                        BasicTextField(
-                            value = nameText,
-                            onValueChange = { nameText = it },
-                            singleLine = true,
-                            textStyle = TextStyle(
-                                color = colors.onBackground,
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.Black,
-                                textAlign = TextAlign.Center
-                            ),
-                            cursorBrush = SolidColor(colors.onBackground),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                            keyboardActions = KeyboardActions(onDone = {
-                                editingName = false
-                                editor.rename(nameText.text)
-                            }),
-                            modifier = Modifier.fillMaxWidth().focusRequester(focus)
-                        )
-                    } else {
-                        Text(
-                            text = editor.project.name,
+                if (editingName && !topLayer) {
+                    BasicTextField(
+                        value = nameText,
+                        onValueChange = { nameText = it },
+                        singleLine = true,
+                        textStyle = TextStyle(
                             color = colors.onBackground,
                             fontSize = 20.sp,
-                            lineHeight = 24.sp,
                             fontWeight = FontWeight.Black,
-                            textAlign = TextAlign.Center,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.combinedClickable(
+                            textAlign = TextAlign.Center
+                        ),
+                        cursorBrush = SolidColor(colors.onBackground),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = {
+                            editingName = false
+                            editor.rename(nameText.text)
+                        }),
+                        modifier = Modifier.fillMaxWidth().focusRequester(focus)
+                    )
+                } else {
+                    Text(
+                        text = editor.project.name,
+                        color = colors.onBackground,
+                        fontSize = 20.sp,
+                        lineHeight = 24.sp,
+                        fontWeight = FontWeight.Black,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = if (topLayer) {
+                            Modifier
+                        } else {
+                            Modifier.combinedClickable(
                                 onClick = {},
                                 onLongClick = { editingName = true }
                             )
-                        )
-                    }
+                        }
+                    )
                 }
+            }
 
-                // Export-Format
-                Box {
-                    PillButton(text = exportFormat.label, onClick = { formatMenu = true })
+            // Export-Format
+            Box(modifier = if (topLayer) Modifier.alpha(0f) else Modifier) {
+                PillButton(
+                    text = exportFormat.label,
+                    onClick = { if (!topLayer) formatMenu = true }
+                )
+                if (!topLayer) {
                     DropdownMenu(expanded = formatMenu, onDismissRequest = { formatMenu = false }) {
                         ExportFormat.values().filter { it != exportFormat }.forEach { f ->
                             DropdownMenuItem(
@@ -627,14 +602,25 @@ fun ProjectScreen(
                         }
                     }
                 }
-
-                Text(
-                    text = "↑",
-                    color = colors.onBackground,
-                    fontSize = 40.sp,
-                    modifier = Modifier.clickable(onClick = onClose).padding(8.dp)
-                )
             }
+
+            Text(
+                text = "↑",
+                color = colors.onBackground,
+                fontSize = 40.sp,
+                modifier = Modifier.clickable(onClick = onClose).padding(8.dp)
+            )
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(colors.background)
+    ) {
+        Column(modifier = Modifier.fillMaxSize().systemBarsPadding()) {
+
+            TitleRow(topLayer = false)
 
             // ---- Steuerzeile ----
             Row(
@@ -730,7 +716,7 @@ fun ProjectScreen(
                             onClick = {
                                 plusMenu = false
                                 editor.addPatternClip(TrackType.EFFECT)
-                                rollClipId = editor.selectedClipId
+                                rollOpen = true
                             }
                         )
                         DropdownMenuItem(
@@ -738,7 +724,7 @@ fun ProjectScreen(
                             onClick = {
                                 plusMenu = false
                                 editor.addPatternClip(TrackType.SYNTH)
-                                rollClipId = editor.selectedClipId
+                                rollOpen = true
                             }
                         )
                         val copied = BlockClipboard.entry
@@ -754,106 +740,167 @@ fun ProjectScreen(
                 }
             }
 
-            // ---- Zeitleiste ----
-            Timeline(
-                editor = editor,
-                state = timeline,
-                peaks = peaks,
-                modifier = Modifier.weight(1f)
-            )
+            // ---- Zeitleiste (mit der Musikrolle als Fläche darüber) ----
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                Timeline(
+                    editor = editor,
+                    state = timeline,
+                    peaks = peaks,
+                    modifier = Modifier.fillMaxSize()
+                )
+                if (rollOpen && patternBlock != null) {
+                    PatternRoll(
+                        type = patternBlock.first.type,
+                        clip = patternBlock.second,
+                        muted = patternBlock.first.muted || patternBlock.second.muted,
+                        onToggle = { lane, cell ->
+                            val on = editor.togglePatternCell(
+                                patternBlock.first.id,
+                                patternBlock.second.id,
+                                lane,
+                                cell
+                            )
+                            if (on) SoundPreview.play(Sounds.lane(patternBlock.first.type, lane))
+                        },
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                    )
+                }
+            }
 
             // ---- Unterer Bereich ----
             Column(modifier = Modifier.fillMaxWidth().background(colors.timelineBg)) {
-
-                // Musikrolle (Effekt und Synth)
-                if (rollOpen && patternBlock != null) {
-                    val rollTrack = patternBlock.first
-                    val rollClip = patternBlock.second
-                    PatternRoll(
-                        type = rollTrack.type,
-                        clip = rollClip,
-                        muted = rollTrack.muted || rollClip.muted,
-                        onToggle = { lane, cell ->
-                            val on = editor.togglePatternCell(rollTrack.id, rollClip.id, lane, cell)
-                            if (on) SoundPreview.play(Sounds.lane(rollTrack.type, lane))
-                        }
-                    )
-                    Box(line)
-                }
-
                 if (selectedRows.isNotEmpty()) {
-                    // Block-Werkzeuge (nur bei einem ausgewählten Block)
-                    if (selectedBlock != null) {
-                        BlockToolsBar(
-                            stretchMode = timeline.stretchMode,
-                            clipMuted = selectedBlock.second.muted,
-                            onMute = { editor.toggleClipMute() },
-                            onSplit = {
-                                val error = editor.splitSelectedClip()
-                                if (error != null) Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+                    val line = Modifier.fillMaxWidth().height(1.dp).background(Color.Gray.copy(alpha = 0.6f))
+
+                    if (effectsOpen) {
+                        // ---- Effekte-Fenster ----
+                        val fx = selectedRows[0].value
+                        val len = fx.extentEnd - fx.extentStart
+                        EffectsPanel(
+                            gains = fx.eqGain,
+                            fadeIn = List(3) { b ->
+                                if (len > 0.0) (fx.eqFadeIn[b] / len).toFloat().coerceIn(0f, 1f) else 0f
                             },
-                            onCopy = { copyBlock(false) },
-                            onCut = { copyBlock(true) },
-                            onStretch = { timeline.stretchMode = true },
-                            onStretchCancel = { cancelStretch() },
-                            onStretchConfirm = { confirmStretch() }
+                            fadeOut = List(3) { b ->
+                                if (len > 0.0) (fx.eqFadeOut[b] / len).toFloat().coerceIn(0f, 1f) else 0f
+                            },
+                            verlaufBand = eqVerlauf,
+                            onVerlaufBand = { eqVerlauf = it },
+                            onGain = { band, db -> editor.setEqGain(band, db) },
+                            onFade = { band, i, o ->
+                                if (len > 0.0) {
+                                    editor.setEqFade(band, i * len, o * len)
+                                } else {
+                                    Toast.makeText(context, "Die Zeile hat noch keine Blöcke", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onLockedTab = {
+                                Toast.makeText(context, "$it kommt in einer späteren Version", Toast.LENGTH_SHORT).show()
+                            }
                         )
                         Box(line)
-                    }
-
-                    // Lautstärke-Regler
-                    if (volumeOpen) {
-                        Box(Modifier.fillMaxWidth().background(colors.rowBg)) {
-                            VolumeSlider(
-                                percent = selectedRows[0].value.volume,
-                                onChange = { editor.setVolume(it) }
-                            )
-                        }
-                        Box(line)
-                    }
-
-                    // Name/BPM-Zeile oder (bei mehreren Zeilen) schmale Lautstärke-Leiste
-                    if (selectedRows.size == 1) {
-                        val row = selectedRows[0].value
-                        RowInfoBar(
-                            trackId = row.id,
-                            name = row.displayName(selectedRows[0].index),
-                            bpmText = formatBpm(row.tempo(editor.project.bpm)),
-                            bpmEditable = row.type == TrackType.AUDIO,
-                            volumeActive = volumeOpen,
-                            onVolume = { volumeOpen = !volumeOpen },
-                            onRename = { editor.renameTrack(row.id, it) },
-                            onBpmCommit = { commitRowBpm(row.id, it) },
-                            onBpmLocked = {
-                                Toast.makeText(context, "Effekt und Synth folgen immer dem Projekt-Tempo", Toast.LENGTH_SHORT).show()
-                            },
-                            onDuplicate = { editor.duplicateTrack(row.id) }
-                        )
                     } else {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(colors.rowBg)
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_speaker),
-                                contentDescription = "Lautstärke",
-                                tint = if (volumeOpen) Color(0xFFE8607A) else colors.onBackground,
-                                modifier = Modifier.size(28.dp).clickable { volumeOpen = !volumeOpen }
+                        // Ein-/Ausblenden-Zeile (über den Block-Werkzeugen)
+                        if (selectedBlock != null && fadeOpen && !timeline.stretchMode) {
+                            val c = selectedBlock.second
+                            val blockLen = c.lengthBar
+                            val inF = (c.fadeIn / blockLen).toFloat().coerceIn(0f, 1f)
+                            val outF = (c.fadeOut / blockLen).toFloat().coerceIn(0f, 1f - inF)
+                            Box(Modifier.fillMaxWidth().background(colors.rowBg)) {
+                                FadeSlider(
+                                    inFrac = inF,
+                                    outFrac = outF,
+                                    onChange = { i, o ->
+                                        editor.setClipFade(selectedBlock.first.id, c.id, i * blockLen, o * blockLen)
+                                    },
+                                    onFinished = { editor.endPatternEdit() }
+                                )
+                            }
+                            Box(line)
+                        }
+
+                        // Block-Werkzeuge (nur bei einem ausgewählten Block)
+                        if (selectedBlock != null) {
+                            BlockToolsBar(
+                                stretchMode = timeline.stretchMode,
+                                clipMuted = selectedBlock.second.muted,
+                                fadeActive = fadeOpen,
+                                onMute = { editor.toggleClipMute() },
+                                onSplit = {
+                                    val error = editor.splitSelectedClip()
+                                    if (error != null) Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+                                },
+                                onCopy = { copyBlock(false) },
+                                onCut = { copyBlock(true) },
+                                onStretch = { timeline.stretchMode = true },
+                                onStretchCancel = { cancelStretch() },
+                                onStretchConfirm = { confirmStretch() },
+                                onFade = { fadeOpen = !fadeOpen }
                             )
-                            Text(
-                                text = "  ${selectedRows.size} Zeilen ausgewählt",
-                                color = colors.onBackground,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
+                            Box(line)
+                        }
+
+                        // Lautstärke-Regler
+                        if (volumeOpen) {
+                            Box(Modifier.fillMaxWidth().background(colors.rowBg)) {
+                                VolumeSlider(
+                                    percent = selectedRows[0].value.volume,
+                                    onChange = { editor.setVolume(it) }
+                                )
+                            }
+                            Box(line)
+                        }
+
+                        // Name/BPM-Zeile oder (bei mehreren Zeilen) schmale Lautstärke-Leiste
+                        if (selectedRows.size == 1) {
+                            val row = selectedRows[0].value
+                            RowInfoBar(
+                                trackId = row.id,
+                                name = row.displayName(selectedRows[0].index),
+                                bpmText = formatBpm(row.tempo(editor.project.bpm)),
+                                bpmEditable = row.type == TrackType.AUDIO,
+                                volumeActive = volumeOpen,
+                                onVolume = { volumeOpen = !volumeOpen },
+                                onRename = { editor.renameTrack(row.id, it) },
+                                onBpmCommit = { commitRowBpm(row.id, it) },
+                                onBpmLocked = {
+                                    Toast.makeText(
+                                        context,
+                                        "Effekt und Synth folgen immer dem Projekt-Tempo",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                },
+                                onDuplicate = { editor.duplicateTrack(row.id) }
                             )
+                        } else {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(colors.rowBg)
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_speaker),
+                                    contentDescription = "Lautstärke",
+                                    tint = if (volumeOpen) Color(0xFFE8607A) else colors.onBackground,
+                                    modifier = Modifier.size(28.dp).clickable { volumeOpen = !volumeOpen }
+                                )
+                                Text(
+                                    text = "  ${selectedRows.size} Zeilen ausgewählt",
+                                    color = colors.onBackground,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
 
-                // Papierkorb, Play/Pause, Bearbeiten, Stummschalten
+                // Papierkorb, Play/Pause, Bearbeiten, Effekte und Stummschalten
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -889,30 +936,44 @@ fun ProjectScreen(
                                 modifier = Modifier.size(44.dp)
                             )
                         }
-                    }
 
-                    // "Bearbeiten" öffnet und schließt die Musikrolle des ausgewählten Blocks
-                    if (patternBlock != null) {
+                        // "Effekte" über dem Stumm-Button
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
                                 .padding(top = 6.dp, end = 12.dp)
-                                .clip(RoundedCornerShape(12.dp))
+                                .clip(RoundedCornerShape(10.dp))
                                 .background(colors.rowBg)
-                                .clickable {
-                                    if (rollOpen) {
-                                        rollClipId = null
-                                        editor.endPatternEdit()
-                                    } else {
-                                        rollClipId = patternBlock.second.id
-                                    }
-                                }
-                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                                .combinedClickable(
+                                    onClick = { effectsOpen = !effectsOpen },
+                                    onLongClick = { effectsOpen = !effectsOpen }
+                                )
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "Effekte",
+                                color = if (effectsOpen) Color(0xFFE8607A) else colors.onBackground,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                        }
+                    }
+
+                    // "Bearbeiten" über dem Papierkorb (nur bei Effekt- und Synth-Blöcken)
+                    if (patternBlock != null) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(top = 6.dp, start = 12.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(colors.rowBg)
+                                .clickable { rollOpen = !rollOpen }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {
                             Text(
                                 text = "Bearbeiten",
                                 color = if (rollOpen) Color(0xFFE8607A) else colors.onBackground,
-                                fontSize = 18.sp,
+                                fontSize = 16.sp,
                                 fontWeight = FontWeight.Black
                             )
                         }
@@ -954,73 +1015,12 @@ fun ProjectScreen(
             }
         }
 
-        // ---- Lade-Fenster mit Hologramm-Glanz über der ganzen Fläche ----
+        // ---- Lade-Fenster über dem ganzen Bildschirm; Projektname und Zurück-Pfeil bleiben obenauf ----
         val percent = busyPercent
         if (percent != null) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(colors.background.copy(alpha = 0.82f))
-                    .pointerInput(Unit) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                event.changes.forEach { it.consume() }
-                            }
-                        }
-                    }
-            ) {
-                HoloShine(Modifier.fillMaxSize())
-                Column(
-                    modifier = Modifier.align(Alignment.Center),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(
-                        text = "$percent %",
-                        color = colors.onBackground,
-                        fontSize = 48.sp,
-                        fontWeight = FontWeight.Black
-                    )
-                    Spacer(Modifier.height(16.dp))
-                    Text(
-                        text = "Beim Schließen vor dem Ende der Bearbeitung bricht die BPM-Änderung ab.",
-                        color = colors.onBackground,
-                        fontSize = 16.sp,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(horizontal = 40.dp)
-                    )
-                }
-            }
-
-            // Projektname und Zurück-Pfeil bleiben oberhalb des Glanzes
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .systemBarsPadding()
-                    .padding(start = 16.dp, end = 8.dp, top = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(modifier = Modifier.weight(1f).padding(end = 8.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = editor.project.name,
-                        color = colors.onBackground,
-                        fontSize = 20.sp,
-                        lineHeight = 24.sp,
-                        fontWeight = FontWeight.Black,
-                        textAlign = TextAlign.Center,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Box(Modifier.alpha(0f)) {
-                    PillButton(text = exportFormat.label, onClick = {})
-                }
-                Text(
-                    text = "↑",
-                    color = colors.onBackground,
-                    fontSize = 40.sp,
-                    modifier = Modifier.clickable(onClick = onClose).padding(8.dp)
-                )
+            LoadingLayer(percent = percent)
+            Box(modifier = Modifier.fillMaxSize().systemBarsPadding()) {
+                TitleRow(topLayer = true)
             }
         }
     }
@@ -1091,5 +1091,74 @@ fun ProjectScreen(
                 TextButton(onClick = { confirmImport(pending, false) }) { Text("Nein") }
             }
         )
+    }
+}
+
+/** Lade-Fenster mit holografischem Glanz, der schräg (45°) mehrmals von links nach rechts über die Fläche fährt. */
+@Composable
+private fun LoadingLayer(percent: Int) {
+    val colors = LocalAppColors.current
+    val transition = rememberInfiniteTransition(label = "shine")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1700, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "shinePhase"
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(colors.background.copy(alpha = 0.82f))
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        event.changes.forEach { it.consume() }
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val d = w * 0.45f * 0.7071f
+            val a = -d + ((w + h) / 2f + 2f * d) * phase
+            val brush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFFFF8AD8).copy(alpha = 0f),
+                    Color(0xFFFF8AD8).copy(alpha = 0.40f),
+                    Color(0xFF80F0FF).copy(alpha = 0.40f),
+                    Color(0xFFB7FF9A).copy(alpha = 0.32f),
+                    Color(0xFFFFF08A).copy(alpha = 0.36f),
+                    Color(0xFFC79CFF).copy(alpha = 0.40f),
+                    Color(0xFFC79CFF).copy(alpha = 0f)
+                ),
+                start = Offset(a, a),
+                end = Offset(a + d, a + d)
+            )
+            drawRect(brush)
+        }
+
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = "$percent %",
+                color = colors.onBackground,
+                fontSize = 48.sp,
+                fontWeight = FontWeight.Black
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "Beim Schließen vor dem Ende der Bearbeitung bricht die BPM-Änderung ab.",
+                color = colors.onBackground,
+                fontSize = 16.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 40.dp)
+            )
+        }
     }
 }
