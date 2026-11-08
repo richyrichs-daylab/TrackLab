@@ -18,6 +18,16 @@ const val CELL_BASE = 100000
 fun patternCells(lengthBar: Double, stretch: Double): Int =
     maxOf(1, (lengthBar * 16.0 * stretch).roundToInt())
 
+/** Alte Synth-Projekte hatten 4 Töne (C5, G5, C3, G3); das sind jetzt diese Zeilen der 20 Töne. */
+private val OLD_SYNTH_LANES = intArrayOf(5, 1, 19, 15)
+
+private fun remapSynthCode(code: Int): Int {
+    val lane = code / CELL_BASE
+    val cell = code % CELL_BASE
+    val newLane = if (lane in OLD_SYNTH_LANES.indices) OLD_SYNTH_LANES[lane] else lane
+    return newLane * CELL_BASE + cell
+}
+
 data class Clip(
     val id: String,
     val startBar: Double,
@@ -82,13 +92,17 @@ data class Clip(
         put("muted", muted)
         put("fadeIn", fadeIn)
         put("fadeOut", fadeOut)
+        put("patternV", 2)
         put("pattern", JSONArray().apply { pattern.sorted().forEach { put(it) } })
         if (sourceFile != null) put("sourceFile", sourceFile)
     }
 
     companion object {
-        /** [legacyLane]: bei alten Trommel-/Hitsch-Blöcken die Tonzeile, aus der das Muster entsteht. */
-        fun fromJson(o: JSONObject, legacyLane: Int = -1): Clip {
+        /**
+         * [legacyLane]: bei alten Trommel-/Hitsch-Blöcken die Tonzeile, aus der das Muster entsteht.
+         * [remapSynth]: bei Synth-Blöcken aus der Zeit mit 4 Tönen werden die Tonzeilen umgerechnet.
+         */
+        fun fromJson(o: JSONObject, legacyLane: Int = -1, remapSynth: Boolean = false): Clip {
             val length = o.getDouble("lengthBar")
             val stretch = o.optDouble("stretch", 1.0)
 
@@ -106,7 +120,11 @@ data class Clip(
             val pattern = HashSet<Int>()
             val array = o.optJSONArray("pattern")
             if (array != null) {
-                for (i in 0 until array.length()) pattern.add(array.getInt(i))
+                val remap = remapSynth && !o.has("patternV")
+                for (i in 0 until array.length()) {
+                    val code = array.getInt(i)
+                    pattern.add(if (remap) remapSynthCode(code) else code)
+                }
             } else if (legacyLane >= 0) {
                 val cells = patternCells(length, stretch)
                 var k = if (legacyLane == 1) 2 else 0
@@ -197,7 +215,7 @@ data class Track(
             val array = o.getJSONArray("clips")
             val clips = ArrayList<Clip>()
             for (i in 0 until array.length()) {
-                clips.add(Clip.fromJson(array.getJSONObject(i), legacyLane))
+                clips.add(Clip.fromJson(array.getJSONObject(i), legacyLane, type == TrackType.SYNTH))
             }
             return Track(
                 id = o.getString("id"),
