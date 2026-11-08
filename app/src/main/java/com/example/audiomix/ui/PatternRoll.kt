@@ -49,13 +49,26 @@ private const val CELL_W_DP = 34
 private const val CELL_GAP_DP = 4
 private const val LANE_H_DP = 52
 private const val HEADER_H_DP = 28
-private const val LABEL_W_DP = 118
+private const val LABEL_W_DP = 160
 
-private fun laneIcon(type: TrackType, lane: Int): Int = when {
-    type == TrackType.SYNTH -> R.drawable.ic_keyboard
-    lane == 0 -> R.drawable.ic_drum
-    else -> R.drawable.ic_hihat
-}
+private val EFFECT_ICONS = intArrayOf(
+    R.drawable.ic_drum,
+    R.drawable.ic_hihat,
+    R.drawable.ic_hihat2,
+    R.drawable.ic_knaller,
+    R.drawable.ic_clap,
+    R.drawable.ic_snap,
+    R.drawable.ic_pen,
+    R.drawable.ic_krach,
+    R.drawable.ic_zap
+)
+
+private fun laneIcon(type: TrackType, lane: Int): Int =
+    if (type == TrackType.SYNTH) {
+        R.drawable.ic_keyboard
+    } else {
+        EFFECT_ICONS[lane.coerceIn(0, EFFECT_ICONS.size - 1)]
+    }
 
 /**
  * Die Musikrolle: 16 Felder pro Takt, gesetzte Felder sind pink.
