@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="design_folder_ok">Design-Ordner festgelegt</string>
+    <string name="design_folder_empty">Keine Designs in diesem Ordner gefunden</string>
+    <string name="cd_design_folder">Design-Ordner wählen</string>
+</resources>
