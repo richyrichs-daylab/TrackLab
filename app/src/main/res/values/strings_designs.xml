@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="design_folder_ok">Design folder set</string>
-    <string name="design_folder_empty">No designs found in this folder</string>
-    <string name="cd_design_folder">Choose design folder</string>
-</resources>
