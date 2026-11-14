@@ -176,7 +176,9 @@ data class Track(
     val eqGain: List<Int> = listOf(0, 0, 0),
     /** Verlauf je Band: Einblenden und Ausblenden in Takten, bezogen auf die ganze Zeile. */
     val eqFadeIn: List<Double> = listOf(0.0, 0.0, 0.0),
-    val eqFadeOut: List<Double> = listOf(0.0, 0.0, 0.0)
+    val eqFadeOut: List<Double> = listOf(0.0, 0.0, 0.0),
+    /** Ausgeschaltete Effekte (leer = alle an). */
+    val fxOff: Set<String> = emptySet()
 ) {
     fun tempo(projectBpm: Int): Double = if (bpm > 0.0) bpm else projectBpm.toDouble()
 
@@ -195,6 +197,7 @@ data class Track(
         put("eqGain", JSONArray().apply { eqGain.forEach { put(it) } })
         put("eqFadeIn", JSONArray().apply { eqFadeIn.forEach { put(it) } })
         put("eqFadeOut", JSONArray().apply { eqFadeOut.forEach { put(it) } })
+        put("fxOff", JSONArray().apply { fxOff.forEach { put(it) } })
         if (name != null) put("name", name)
         put("clips", JSONArray().apply { clips.forEach { put(it.toJson()) } })
     }
@@ -227,7 +230,10 @@ data class Track(
                 volume = o.optInt("volume", 100),
                 eqGain = o.intList3("eqGain"),
                 eqFadeIn = o.doubleList3("eqFadeIn"),
-                eqFadeOut = o.doubleList3("eqFadeOut")
+                eqFadeOut = o.doubleList3("eqFadeOut"),
+                fxOff = (o.optJSONArray("fxOff")?.let { a ->
+                    (0 until a.length()).map { a.getString(it) }.toSet()
+                } ?: emptySet())
             )
         }
     }
