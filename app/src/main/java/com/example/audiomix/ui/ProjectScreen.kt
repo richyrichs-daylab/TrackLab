@@ -780,6 +780,8 @@ fun ProjectScreen(
                         val fx = selectedRows[0].value
                         val len = fx.extentEnd - fx.extentStart
                         EffectsPanel(
+                            enabled = "pitch" !in fx.fxOff,
+                            onEnabledChange = { editor.setFxEnabled("pitch", it) },
                             gains = fx.eqGain,
                             fadeIn = List(3) { b ->
                                 if (len > 0.0) (fx.eqFadeIn[b] / len).toFloat().coerceIn(0f, 1f) else 0f
