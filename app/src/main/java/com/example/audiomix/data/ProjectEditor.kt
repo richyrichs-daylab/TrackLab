@@ -140,6 +140,42 @@ class ProjectEditor(
         )
     }
 
+        /** Schaltet einen Effekt der ausgewählten Zeilen an oder aus (Standard: an). */
+    fun setFxEnabled(key: String, enabled: Boolean) {
+        update(
+            project.copy(
+                tracks = tracks.map { t ->
+                    if (t.id in selectedTrackIds) {
+                        t.copy(fxOff = if (enabled) t.fxOff - key else t.fxOff + key)
+                    } else {
+                        t
+                    }
+                }
+            )
+        )
+    }
+
+    /** Setzt einen Effekt der ausgewählten Zeilen auf die Standardeinstellungen zurück (und schaltet ihn an). */
+    fun resetEffect(key: String) {
+        update(
+            project.copy(
+                tracks = tracks.map { t ->
+                    if (t.id !in selectedTrackIds) {
+                        t
+                    } else if (key == "pitch") {
+                        t.copy(
+                            eqGain = listOf(0, 0, 0),
+                            eqFadeIn = listOf(0.0, 0.0, 0.0),
+                            eqFadeOut = listOf(0.0, 0.0, 0.0),
+                            fxOff = t.fxOff - key
+                        )
+                    } else {
+                        t.copy(fxOff = t.fxOff - key)
+                    }
+                }
+            )
+        )
+    }
     /** Ein-/Ausblenden eines Blocks. Alle Änderungen bis [endPatternEdit] sind ein Rückgängig-Schritt. */
     fun setClipFade(trackId: String, clipId: String, fadeIn: Double, fadeOut: Double) {
         if (patternBase == null) patternBase = project.tracks
