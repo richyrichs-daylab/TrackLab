@@ -78,7 +78,7 @@ class ProjectEditor(
         selectedClipId = null
     }
 
-    // ---------- Namen, Stumm, Lautstärke, Effekte ----------
+    // ---------- Namen, Stumm, Lautstärke ----------
 
     fun rename(newName: String) {
         val name = newName.trim().ifBlank { project.name }
@@ -107,7 +107,9 @@ class ProjectEditor(
         )
     }
 
-    /** Equalizer-Band (0 Treble, 1 Mid, 2 Bass) der ausgewählten Zeilen in dB. */
+    // ---------- Effekte (gelten für alle ausgewählten Zeilen) ----------
+
+    /** Equalizer-Band (0 Treble, 1 Mid, 2 Bass) in dB. */
     fun setEqGain(band: Int, db: Int) {
         update(
             project.copy(
@@ -122,7 +124,7 @@ class ProjectEditor(
         )
     }
 
-    /** Verlauf eines Bands (Einblenden und Ausblenden in Takten, bezogen auf die ganze Zeile). */
+    /** Verlauf eines Equalizer-Bands (Takte, bezogen auf die ganze Zeile). */
     fun setEqFade(band: Int, fadeInBars: Double, fadeOutBars: Double) {
         update(
             project.copy(
@@ -140,7 +142,73 @@ class ProjectEditor(
         )
     }
 
-        /** Schaltet einen Effekt der ausgewählten Zeilen an oder aus (Standard: an). */
+    /** Delay-Regler (0 Decay, 1 Time, 2 Mix), Wert 0 bis 1. */
+    fun setDelay(param: Int, value: Double) {
+        update(
+            project.copy(
+                tracks = tracks.map { t ->
+                    if (t.id in selectedTrackIds) {
+                        t.copy(delay = t.delay.toMutableList().also { it[param] = value.coerceIn(0.0, 1.0) })
+                    } else {
+                        t
+                    }
+                }
+            )
+        )
+    }
+
+    fun setDelayFade(param: Int, fadeInBars: Double, fadeOutBars: Double) {
+        update(
+            project.copy(
+                tracks = tracks.map { t ->
+                    if (t.id in selectedTrackIds) {
+                        t.copy(
+                            delayFadeIn = t.delayFadeIn.toMutableList().also { it[param] = fadeInBars },
+                            delayFadeOut = t.delayFadeOut.toMutableList().also { it[param] = fadeOutBars }
+                        )
+                    } else {
+                        t
+                    }
+                }
+            )
+        )
+    }
+
+    fun setReverbLevel(level: Double) {
+        update(
+            project.copy(
+                tracks = tracks.map { t ->
+                    if (t.id in selectedTrackIds) t.copy(reverbLevel = level.coerceIn(0.0, 1.0)) else t
+                }
+            )
+        )
+    }
+
+    fun setReverbFade(fadeInBars: Double, fadeOutBars: Double) {
+        update(
+            project.copy(
+                tracks = tracks.map { t ->
+                    if (t.id in selectedTrackIds) {
+                        t.copy(reverbFadeIn = fadeInBars, reverbFadeOut = fadeOutBars)
+                    } else {
+                        t
+                    }
+                }
+            )
+        )
+    }
+
+    fun setReverbPreset(index: Int) {
+        update(
+            project.copy(
+                tracks = tracks.map { t ->
+                    if (t.id in selectedTrackIds) t.copy(reverbPreset = index.coerceIn(0, 5)) else t
+                }
+            )
+        )
+    }
+
+    /** Schaltet einen Effekt ("pitch", "delay", "reverb") an oder aus (Standard: an). */
     fun setFxEnabled(key: String, enabled: Boolean) {
         update(
             project.copy(
@@ -155,27 +223,42 @@ class ProjectEditor(
         )
     }
 
-    /** Setzt einen Effekt der ausgewählten Zeilen auf die Standardeinstellungen zurück (und schaltet ihn an). */
+    /** Setzt einen Effekt auf die Standardeinstellungen zurück (und schaltet ihn an). */
     fun resetEffect(key: String) {
         update(
             project.copy(
                 tracks = tracks.map { t ->
                     if (t.id !in selectedTrackIds) {
                         t
-                    } else if (key == "pitch") {
-                        t.copy(
-                            eqGain = listOf(0, 0, 0),
-                            eqFadeIn = listOf(0.0, 0.0, 0.0),
-                            eqFadeOut = listOf(0.0, 0.0, 0.0),
-                            fxOff = t.fxOff - key
-                        )
                     } else {
-                        t.copy(fxOff = t.fxOff - key)
+                        when (key) {
+                            "pitch" -> t.copy(
+                                eqGain = listOf(0, 0, 0),
+                                eqFadeIn = listOf(0.0, 0.0, 0.0),
+                                eqFadeOut = listOf(0.0, 0.0, 0.0),
+                                fxOff = t.fxOff - key
+                            )
+                            "delay" -> t.copy(
+                                delay = FxDefaults.DELAY,
+                                delayFadeIn = listOf(0.0, 0.0, 0.0),
+                                delayFadeOut = listOf(0.0, 0.0, 0.0),
+                                fxOff = t.fxOff - key
+                            )
+                            "reverb" -> t.copy(
+                                reverbLevel = 0.0,
+                                reverbFadeIn = 0.0,
+                                reverbFadeOut = 0.0,
+                                reverbPreset = FxDefaults.REVERB_PRESET,
+                                fxOff = t.fxOff - key
+                            )
+                            else -> t
+                        }
                     }
                 }
             )
         )
     }
+
     /** Ein-/Ausblenden eines Blocks. Alle Änderungen bis [endPatternEdit] sind ein Rückgängig-Schritt. */
     fun setClipFade(trackId: String, clipId: String, fadeIn: Double, fadeOut: Double) {
         if (patternBase == null) patternBase = project.tracks
@@ -196,6 +279,15 @@ class ProjectEditor(
 
     // ---------- Tempo ----------
 
+    private fun scaleFades(t: Track, factor: Double): Track = t.copy(
+        eqFadeIn = t.eqFadeIn.map { it * factor },
+        eqFadeOut = t.eqFadeOut.map { it * factor },
+        delayFadeIn = t.delayFadeIn.map { it * factor },
+        delayFadeOut = t.delayFadeOut.map { it * factor },
+        reverbFadeIn = t.reverbFadeIn * factor,
+        reverbFadeOut = t.reverbFadeOut * factor
+    )
+
     fun applyProjectBpm(newBpm: Int, changedRowIds: Set<String>) {
         val p = project.bpm.toDouble()
         val p2 = newBpm.toDouble()
@@ -206,12 +298,7 @@ class ProjectEditor(
                 val r = t.tempo(project.bpm)
                 val r2 = if (t.id in changedRowIds) p2 else r
                 val factor = (p2 / r2) / (p / r)
-                t.copy(
-                    bpm = r2,
-                    clips = rescale(t.clips, factor),
-                    eqFadeIn = t.eqFadeIn.map { it * factor },
-                    eqFadeOut = t.eqFadeOut.map { it * factor }
-                )
+                scaleFades(t.copy(bpm = r2, clips = rescale(t.clips, factor)), factor)
             }
         }
         patternBase = null
@@ -225,12 +312,7 @@ class ProjectEditor(
         val newTracks = tracks.map { t ->
             if (t.id == trackId && t.type == TrackType.AUDIO) {
                 val factor = t.tempo(project.bpm) / newBpm
-                t.copy(
-                    bpm = newBpm,
-                    clips = rescale(t.clips, factor),
-                    eqFadeIn = t.eqFadeIn.map { it * factor },
-                    eqFadeOut = t.eqFadeOut.map { it * factor }
-                )
+                scaleFades(t.copy(bpm = newBpm, clips = rescale(t.clips, factor)), factor)
             } else {
                 t
             }
@@ -489,7 +571,7 @@ class ProjectEditor(
 
     // ---------- intern ----------
 
-    /** Beim Rückgängig-Machen bleiben Zeilenname, Lautstärke und Effekte, wie sie gerade sind. */
+    /** Beim Rückgängig-Machen bleiben Zeilenname, Lautstärke und alle Effekte, wie sie gerade sind. */
     private fun withCurrentMeta(snapshot: List<Track>): List<Track> =
         snapshot.map { s ->
             val current = tracks.firstOrNull { it.id == s.id }
@@ -499,7 +581,15 @@ class ProjectEditor(
                     volume = current.volume,
                     eqGain = current.eqGain,
                     eqFadeIn = current.eqFadeIn,
-                    eqFadeOut = current.eqFadeOut
+                    eqFadeOut = current.eqFadeOut,
+                    fxOff = current.fxOff,
+                    delay = current.delay,
+                    delayFadeIn = current.delayFadeIn,
+                    delayFadeOut = current.delayFadeOut,
+                    reverbLevel = current.reverbLevel,
+                    reverbFadeIn = current.reverbFadeIn,
+                    reverbFadeOut = current.reverbFadeOut,
+                    reverbPreset = current.reverbPreset
                 )
             } else {
                 s
