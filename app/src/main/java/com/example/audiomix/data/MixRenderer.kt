@@ -140,6 +140,104 @@ private fun makeBand(band: Int, gainDb: Int, rate: Int): BandFilter? {
     )
 }
 
+/** Eine Echo-Leitung (ein Kanal) mit Rückkopplung. */
+private class DelayChannel(size: Int) {
+    private val buf = FloatArray(size)
+    private var pos = 0
+
+    /** Gibt das Echo zurück, das [d] Samples zurückliegt, und schreibt [x] plus Rückkopplung hinein. */
+    fun step(x: Float, d: Float, fb: Float): Float {
+        var rp = pos - d
+        while (rp < 0f) rp += buf.size
+        var i0 = rp.toInt()
+        if (i0 >= buf.size) i0 = 0
+        val frac = rp - i0
+        val i1 = if (i0 + 1 >= buf.size) 0 else i0 + 1
+        val y = buf[i0] * (1f - frac) + buf[i1] * frac
+        buf[pos] = x + y * fb
+        pos++
+        if (pos >= buf.size) pos = 0
+        return y
+    }
+}
+
+private class DelayFx(rate: Int) {
+    val left = DelayChannel(rate + 8)
+    val right = DelayChannel(rate + 8)
+    val maxDelay: Float = rate.toFloat()
+}
+
+/** Ein einfacher Hall (acht Kammfilter und vier Allpässe je Seite). Der Raum bestimmt Größe, Dauer und Dunkelheit. */
+private class ReverbFx(preset: Int) {
+    /** Größe, Rückkopplung (Dauer), Dämpfung (Dunkelheit). */
+    private val params: FloatArray = when (preset) {
+        0 -> floatArrayOf(0.55f, 0.80f, 0.15f)   // small plate
+        1 -> floatArrayOf(0.85f, 0.84f, 0.20f)   // medium plate
+        2 -> floatArrayOf(1.25f, 0.88f, 0.25f)   // big plate
+        3 -> floatArrayOf(2.20f, 0.91f, 0.55f)   // cave
+        4 -> floatArrayOf(1.50f, 0.83f, 0.30f)   // hallway
+        else -> floatArrayOf(0.40f, 0.70f, 0.50f) // behind you (kleiner Raum)
+    }
+    private val scale = params[0]
+    private val feedback = params[1]
+    private val damp = params[2]
+
+    private val combTunings = intArrayOf(1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617)
+    private val allpassTunings = intArrayOf(556, 441, 341, 225)
+
+    private val combL = Array(8) { FloatArray(maxOf(8, (combTunings[it] * scale).toInt())) }
+    private val combR = Array(8) { FloatArray(maxOf(8, ((combTunings[it] + 23) * scale).toInt())) }
+    private val combPosL = IntArray(8)
+    private val combPosR = IntArray(8)
+    private val combStoreL = FloatArray(8)
+    private val combStoreR = FloatArray(8)
+
+    private val apL = Array(4) { FloatArray(allpassTunings[it]) }
+    private val apR = Array(4) { FloatArray(allpassTunings[it] + 23) }
+    private val apPosL = IntArray(4)
+    private val apPosR = IntArray(4)
+
+    var outL = 0f
+        private set
+    var outR = 0f
+        private set
+
+    private fun comb(buf: FloatArray, pos: IntArray, store: FloatArray, i: Int, input: Float): Float {
+        val o = buf[pos[i]]
+        store[i] = o * (1f - damp) + store[i] * damp
+        buf[pos[i]] = input + store[i] * feedback
+        pos[i]++
+        if (pos[i] >= buf.size) pos[i] = 0
+        return o
+    }
+
+    private fun allpass(buf: FloatArray, pos: IntArray, i: Int, input: Float): Float {
+        val b = buf[pos[i]]
+        val out = -input + b
+        buf[pos[i]] = input + b * 0.5f
+        pos[i]++
+        if (pos[i] >= buf.size) pos[i] = 0
+        return out
+    }
+
+    /** Verarbeitet einen Eingangswert; das Ergebnis steht in [outL] und [outR] (nur der Hallanteil). */
+    fun process(x: Float) {
+        val input = x * 0.015f
+        var sumL = 0f
+        var sumR = 0f
+        for (c in 0 until 8) {
+            sumL += comb(combL[c], combPosL, combStoreL, c, input)
+            sumR += comb(combR[c], combPosR, combStoreR, c, input)
+        }
+        for (a in 0 until 4) {
+            sumL = allpass(apL[a], apPosL, a, sumL)
+            sumR = allpass(apR[a], apPosR, a, sumR)
+        }
+        outL = sumL
+        outR = sumR
+    }
+}
+
 /** Rechnet alle Zeilen eines Projekts zu einem Stereo-Signal (44,1 kHz, 16 Bit) zusammen. */
 class MixRenderer(
     context: Context,
@@ -156,9 +254,13 @@ class MixRenderer(
         val track: Track,
         val clips: List<Clip>,
         val eq: Array<BandFilter?>?,
+        val delay: DelayFx?,
+        val reverb: ReverbFx?,
         val start: Double,
         val end: Double
-    )
+    ) {
+        val hasFx: Boolean get() = eq != null || delay != null || reverb != null
+    }
 
     private val appContext = context.applicationContext
     private val pcmFiles = ConcurrentHashMap<String, RandomAccessFile>()
@@ -167,11 +269,15 @@ class MixRenderer(
     private val lanes: List<Lane> = tracks
         .filter { !it.muted && it.volume > 0 }
         .map { t ->
-            val eq = if (t.hasEq) Array(3) { b -> makeBand(b, t.eqGain[b], 44100) } else null
+            val eqOn = t.hasEq && "pitch" !in t.fxOff
+            val delayOn = "delay" !in t.fxOff && t.delay[2] > 0.0
+            val reverbOn = "reverb" !in t.fxOff && t.reverbLevel > 0.0
             Lane(
                 t,
                 t.clips.filter { !it.muted }.flatMap { it.tiles() },
-                eq,
+                if (eqOn) Array(3) { b -> makeBand(b, t.eqGain[b], 44100) } else null,
+                if (delayOn) DelayFx(RATE) else null,
+                if (reverbOn) ReverbFx(t.reverbPreset) else null,
                 t.extentStart,
                 t.extentEnd
             )
@@ -179,9 +285,20 @@ class MixRenderer(
 
     val framesPerBar: Double = 240.0 / bpm * RATE
 
+    /** Echo und Nachhall klingen nach dem letzten Block weiter. */
+    private val fxTailFrames: Long = lanes.maxOfOrNull { lane ->
+        var sec = 0.0
+        if (lane.reverb != null) sec = 4.0
+        if (lane.delay != null) {
+            val d = lane.track.delay
+            sec = maxOf(sec, minOf(8.0, (0.05 + 0.95 * d[1]) * (1.0 + 5.0 * d[0])))
+        }
+        (sec * RATE).toLong()
+    } ?: 0L
+
     val totalFrames: Long =
         ((tracks.flatMap { it.clips }.maxOfOrNull { it.endBar } ?: 0.0) * framesPerBar).toLong() +
-            TAIL_FRAMES
+            TAIL_FRAMES + fxTailFrames
 
     private fun fileKey(name: String, speed: Double): String = "$name|${StretchFiles.key(speed)}"
 
@@ -206,7 +323,7 @@ class MixRenderer(
         val acc = IntArray(count * 2)
         val endFrame = startFrame + count
         for (lane in lanes) {
-            val target = if (lane.eq != null) IntArray(count * 2) else acc
+            val target = if (lane.hasFx) IntArray(count * 2) else acc
             val gain = lane.track.volume
             for (clip in lane.clips) {
                 when (lane.track.type) {
@@ -215,7 +332,7 @@ class MixRenderer(
                         mixPattern(clip, Sounds.set(lane.track.type), gain, startFrame, endFrame, target)
                 }
             }
-            if (lane.eq != null) applyEq(lane, startFrame, count, target, acc)
+            if (lane.hasFx) applyFx(lane, startFrame, count, target, acc)
         }
         for (i in 0 until count * 2) {
             out[i] = acc[i].coerceIn(-32768, 32767).toShort()
@@ -243,10 +360,8 @@ class MixRenderer(
         return f.coerceIn(0.0, 1.0).toFloat()
     }
 
-    /** Wie stark ein Equalizer-Band an dieser Stelle wirkt (Verlauf). */
-    private fun bandWeight(lane: Lane, band: Int, bar: Double): Float {
-        val fi = lane.track.eqFadeIn[band]
-        val fo = lane.track.eqFadeOut[band]
+    /** Wie stark ein Effekt-Wert an dieser Stelle der Zeile wirkt (Verlauf: ein- und ausblenden). */
+    private fun fadeWeight(lane: Lane, fi: Double, fo: Double, bar: Double): Float {
         if (fi <= 0.0 && fo <= 0.0) return 1f
         var w = 1.0
         if (fi > 0.0) w = minOf(w, (bar - lane.start) / fi)
@@ -260,20 +375,48 @@ class MixRenderer(
         return x + w * (y - x)
     }
 
-    private fun applyEq(lane: Lane, startFrame: Long, count: Int, src: IntArray, dst: IntArray) {
-        val eq = lane.eq ?: return
+    /** Wendet nacheinander Tonhöhen, Delay und Reverb der Zeile an und addiert das Ergebnis zu [dst]. */
+    private fun applyFx(lane: Lane, startFrame: Long, count: Int, src: IntArray, dst: IntArray) {
+        val tr = lane.track
+        val eq = lane.eq
+        val delay = lane.delay
+        val reverb = lane.reverb
         for (fr in 0 until count) {
             val bar = (startFrame + fr) / framesPerBar
-            val w0 = bandWeight(lane, 0, bar)
-            val w1 = bandWeight(lane, 1, bar)
-            val w2 = bandWeight(lane, 2, bar)
-            for (ch in 0..1) {
-                var x = src[fr * 2 + ch].toFloat()
-                x = stage(eq[0], ch, x, w0)
-                x = stage(eq[1], ch, x, w1)
-                x = stage(eq[2], ch, x, w2)
-                dst[fr * 2 + ch] += x.toInt()
+            var l = src[fr * 2].toFloat()
+            var r = src[fr * 2 + 1].toFloat()
+
+            if (eq != null) {
+                val w0 = fadeWeight(lane, tr.eqFadeIn[0], tr.eqFadeOut[0], bar)
+                val w1 = fadeWeight(lane, tr.eqFadeIn[1], tr.eqFadeOut[1], bar)
+                val w2 = fadeWeight(lane, tr.eqFadeIn[2], tr.eqFadeOut[2], bar)
+                l = stage(eq[2], 0, stage(eq[1], 0, stage(eq[0], 0, l, w0), w1), w2)
+                r = stage(eq[2], 1, stage(eq[1], 1, stage(eq[0], 1, r, w0), w1), w2)
             }
+
+            if (delay != null) {
+                val wDecay = fadeWeight(lane, tr.delayFadeIn[0], tr.delayFadeOut[0], bar)
+                val wTime = fadeWeight(lane, tr.delayFadeIn[1], tr.delayFadeOut[1], bar)
+                val wMix = fadeWeight(lane, tr.delayFadeIn[2], tr.delayFadeOut[2], bar)
+                val feedback = (tr.delay[0] * 0.9 * wDecay).toFloat()
+                val timeMs = 50.0 + tr.delay[1] * 950.0 * wTime
+                val d = (timeMs * RATE / 1000.0).toFloat().coerceIn(1f, delay.maxDelay)
+                val wet = (tr.delay[2] * wMix).toFloat()
+                val yl = delay.left.step(l, d, feedback)
+                val yr = delay.right.step(r, d, feedback)
+                l += yl * wet
+                r += yr * wet
+            }
+
+            if (reverb != null) {
+                val level = (tr.reverbLevel * fadeWeight(lane, tr.reverbFadeIn, tr.reverbFadeOut, bar)).toFloat()
+                reverb.process((l + r) * 0.5f)
+                l += reverb.outL * level * 3f
+                r += reverb.outR * level * 3f
+            }
+
+            dst[fr * 2] += l.toInt()
+            dst[fr * 2 + 1] += r.toInt()
         }
     }
 
