@@ -149,13 +149,14 @@ fun ProjectScreen(
     var rollOpen by remember { mutableStateOf(false) }
     var fadeOpen by remember { mutableStateOf(false) }
     var effectsOpen by remember { mutableStateOf(false) }
-    var eqVerlauf by remember { mutableStateOf<Int?>(null) }
+    var effectTab by remember { mutableIntStateOf(0) }
+    var fxVerlauf by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(selectedRows.isEmpty()) {
         if (selectedRows.isEmpty()) {
             volumeOpen = false
             effectsOpen = false
-            eqVerlauf = null
+            fxVerlauf = null
         }
     }
 
@@ -183,8 +184,13 @@ fun ProjectScreen(
         }
     }
 
-    // Stumm, Lautstärke, Block-Stumm und Equalizer-Regler wirken auch während des Abspielens
-    val mixKey = editor.tracks.map { t -> listOf(t.muted, t.volume, t.clips.map { it.muted }, t.eqGain) }
+    // Stumm, Lautstärke, Block-Stumm und Effekt-Regler wirken auch während des Abspielens
+    val mixKey = editor.tracks.map { t ->
+        listOf(
+            t.muted, t.volume, t.clips.map { it.muted },
+            t.eqGain, t.fxOff, t.delay, t.reverbLevel, t.reverbPreset
+        )
+    }
 
     var busyPercent by remember { mutableStateOf<Int?>(null) }
     var bpmQuestion by remember { mutableStateOf<Int?>(null) }
@@ -778,27 +784,17 @@ fun ProjectScreen(
                     if (effectsOpen) {
                         // ---- Effekte-Fenster ----
                         val fx = selectedRows[0].value
-                        val len = fx.extentEnd - fx.extentStart
                         EffectsPanel(
-                            enabled = "pitch" !in fx.fxOff,
-                            onEnabledChange = { editor.setFxEnabled("pitch", it) },
-                            gains = fx.eqGain,
-                            fadeIn = List(3) { b ->
-                                if (len > 0.0) (fx.eqFadeIn[b] / len).toFloat().coerceIn(0f, 1f) else 0f
+                            track = fx,
+                            extentLength = fx.extentEnd - fx.extentStart,
+                            editor = editor,
+                            tab = effectTab,
+                            onTab = {
+                                effectTab = it
+                                fxVerlauf = null
                             },
-                            fadeOut = List(3) { b ->
-                                if (len > 0.0) (fx.eqFadeOut[b] / len).toFloat().coerceIn(0f, 1f) else 0f
-                            },
-                            verlaufBand = eqVerlauf,
-                            onVerlaufBand = { eqVerlauf = it },
-                            onGain = { band, db -> editor.setEqGain(band, db) },
-                            onFade = { band, i, o ->
-                                if (len > 0.0) {
-                                    editor.setEqFade(band, i * len, o * len)
-                                } else {
-                                    Toast.makeText(context, "Die Zeile hat noch keine Blöcke", Toast.LENGTH_SHORT).show()
-                                }
-                            },
+                            verlauf = fxVerlauf,
+                            onVerlauf = { fxVerlauf = it },
                             onLockedTab = {
                                 Toast.makeText(context, "$it kommt in einer späteren Version", Toast.LENGTH_SHORT).show()
                             }
@@ -902,7 +898,7 @@ fun ProjectScreen(
                     }
                 }
 
-                // Papierkorb, Play/Pause, Bearbeiten, Effekte und Stummschalten
+                // Papierkorb, Play/Pause, Reset, Bearbeiten, Effekte und Stummschalten
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -961,8 +957,31 @@ fun ProjectScreen(
                         }
                     }
 
+                    // "Reset" (nur bei geöffnetem Effekte-Fenster): setzt den gewählten Effekt zurück
+                    if (effectsOpen && selectedRows.isNotEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(top = 6.dp, start = 12.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(colors.rowBg)
+                                .clickable {
+                                    editor.resetEffect(FX_KEYS[effectTab.coerceIn(0, FX_KEYS.size - 1)])
+                                    fxVerlauf = null
+                                }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "Reset",
+                                color = colors.onBackground,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                        }
+                    }
+
                     // "Bearbeiten" über dem Papierkorb (nur bei Effekt- und Synth-Blöcken)
-                    if (patternBlock != null) {
+                    if (patternBlock != null && !effectsOpen) {
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopStart)
