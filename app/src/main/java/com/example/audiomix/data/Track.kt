@@ -28,6 +28,15 @@ private fun remapSynthCode(code: Int): Int {
     return newLane * CELL_BASE + cell
 }
 
+/** Standardwerte der Effekte. */
+object FxDefaults {
+    /** Delay: Decay, Time, Mix (jeweils 0 bis 1). Mix 0 = zunächst unhörbar. */
+    val DELAY: List<Double> = listOf(0.4, 0.3, 0.0)
+
+    /** Reverb: 1 = medium plate. */
+    const val REVERB_PRESET = 1
+}
+
 data class Clip(
     val id: String,
     val startBar: Double,
@@ -159,9 +168,12 @@ private fun JSONObject.intList3(key: String): List<Int> {
     return List(3) { i -> if (a != null && i < a.length()) a.optInt(i, 0) else 0 }
 }
 
-private fun JSONObject.doubleList3(key: String): List<Double> {
+private fun JSONObject.doubleList3(
+    key: String,
+    default: List<Double> = listOf(0.0, 0.0, 0.0)
+): List<Double> {
     val a = optJSONArray(key)
-    return List(3) { i -> if (a != null && i < a.length()) a.optDouble(i, 0.0) else 0.0 }
+    return List(3) { i -> if (a != null && i < a.length()) a.optDouble(i, default[i]) else default[i] }
 }
 
 data class Track(
@@ -177,8 +189,17 @@ data class Track(
     /** Verlauf je Band: Einblenden und Ausblenden in Takten, bezogen auf die ganze Zeile. */
     val eqFadeIn: List<Double> = listOf(0.0, 0.0, 0.0),
     val eqFadeOut: List<Double> = listOf(0.0, 0.0, 0.0),
-    /** Ausgeschaltete Effekte (leer = alle an). */
-    val fxOff: Set<String> = emptySet()
+    /** Ausgeschaltete Effekte: "pitch", "delay", "reverb" (leer = alle an). */
+    val fxOff: Set<String> = emptySet(),
+    /** Delay: Decay, Time, Mix (0 bis 1). */
+    val delay: List<Double> = FxDefaults.DELAY,
+    val delayFadeIn: List<Double> = listOf(0.0, 0.0, 0.0),
+    val delayFadeOut: List<Double> = listOf(0.0, 0.0, 0.0),
+    /** Reverb: Level (0 bis 1), Verlauf und Raum (0 bis 5). */
+    val reverbLevel: Double = 0.0,
+    val reverbFadeIn: Double = 0.0,
+    val reverbFadeOut: Double = 0.0,
+    val reverbPreset: Int = FxDefaults.REVERB_PRESET
 ) {
     fun tempo(projectBpm: Int): Double = if (bpm > 0.0) bpm else projectBpm.toDouble()
 
@@ -198,6 +219,13 @@ data class Track(
         put("eqFadeIn", JSONArray().apply { eqFadeIn.forEach { put(it) } })
         put("eqFadeOut", JSONArray().apply { eqFadeOut.forEach { put(it) } })
         put("fxOff", JSONArray().apply { fxOff.forEach { put(it) } })
+        put("delay", JSONArray().apply { delay.forEach { put(it) } })
+        put("delayFadeIn", JSONArray().apply { delayFadeIn.forEach { put(it) } })
+        put("delayFadeOut", JSONArray().apply { delayFadeOut.forEach { put(it) } })
+        put("reverbLevel", reverbLevel)
+        put("reverbFadeIn", reverbFadeIn)
+        put("reverbFadeOut", reverbFadeOut)
+        put("reverbPreset", reverbPreset)
         if (name != null) put("name", name)
         put("clips", JSONArray().apply { clips.forEach { put(it.toJson()) } })
     }
@@ -220,6 +248,12 @@ data class Track(
             for (i in 0 until array.length()) {
                 clips.add(Clip.fromJson(array.getJSONObject(i), legacyLane, type == TrackType.SYNTH))
             }
+            val off = o.optJSONArray("fxOff")
+            val fxOff = if (off == null) {
+                emptySet()
+            } else {
+                (0 until off.length()).map { off.getString(it) }.toSet()
+            }
             return Track(
                 id = o.getString("id"),
                 type = type,
@@ -231,9 +265,14 @@ data class Track(
                 eqGain = o.intList3("eqGain"),
                 eqFadeIn = o.doubleList3("eqFadeIn"),
                 eqFadeOut = o.doubleList3("eqFadeOut"),
-                fxOff = (o.optJSONArray("fxOff")?.let { a ->
-                    (0 until a.length()).map { a.getString(it) }.toSet()
-                } ?: emptySet())
+                fxOff = fxOff,
+                delay = o.doubleList3("delay", FxDefaults.DELAY),
+                delayFadeIn = o.doubleList3("delayFadeIn"),
+                delayFadeOut = o.doubleList3("delayFadeOut"),
+                reverbLevel = o.optDouble("reverbLevel", 0.0),
+                reverbFadeIn = o.optDouble("reverbFadeIn", 0.0),
+                reverbFadeOut = o.optDouble("reverbFadeOut", 0.0),
+                reverbPreset = o.optInt("reverbPreset", FxDefaults.REVERB_PRESET)
             )
         }
     }
