@@ -188,7 +188,8 @@ fun ProjectScreen(
     val mixKey = editor.tracks.map { t ->
         listOf(
             t.muted, t.volume, t.clips.map { it.muted },
-            t.eqGain, t.fxOff, t.delay, t.reverbLevel, t.reverbPreset
+            t.eqGain, t.fxOff, t.delay, t.reverbLevel, t.reverbPreset,
+            t.radio, t.threeDPos, t.threeDAcid
         )
     }
 
@@ -794,10 +795,7 @@ fun ProjectScreen(
                                 fxVerlauf = null
                             },
                             verlauf = fxVerlauf,
-                            onVerlauf = { fxVerlauf = it },
-                            onLockedTab = {
-                                Toast.makeText(context, "$it kommt in einer späteren Version", Toast.LENGTH_SHORT).show()
-                            }
+                            onVerlauf = { fxVerlauf = it }
                         )
                         Box(line)
                     } else {
