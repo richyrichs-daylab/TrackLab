@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.PI
 import kotlin.math.exp
 import kotlin.math.sin
+import kotlin.math.tanh
 import kotlin.random.Random
 
 /** Synthetische Klänge für Effekt und Synth. */
@@ -238,6 +239,35 @@ private class ReverbFx(preset: Int) {
     }
 }
 
+/** Radio (Overdrive): Zustand der beiden Tiefpässe nach der Verzerrung (je Kanal). */
+private class RadioFx {
+    val s1 = FloatArray(2)
+    val s2 = FloatArray(2)
+}
+
+/** 3D: Zustand des Filters und der Überblendung zwischen den zwei Seiten (Acid). */
+private class SpatialFx {
+    var lpL = 0f
+    var lpR = 0f
+    var mix = 0f
+}
+
+/** Positionen: 0 Mitte, 1 vorne, 2 rechts, 3 links, 4 hinten. */
+private val POS_GAIN_L = floatArrayOf(1f, 1.1f, 0.15f, 1f, 0.8f)
+private val POS_GAIN_R = floatArrayOf(1f, 1.1f, 1f, 0.15f, 0.8f)
+
+/** Wie dunkel (1 = ganz dunkel) und wie hell (Höhenanhebung) die Position klingt. */
+private val POS_DARK = floatArrayOf(0f, 0f, 0f, 0f, 1f)
+private val POS_BRIGHT = floatArrayOf(0f, 0.6f, 0f, 0f, 0f)
+
+private fun oppositePos(pos: Int): Int = when (pos) {
+    1 -> 4
+    4 -> 1
+    2 -> 3
+    3 -> 2
+    else -> 0
+}
+
 /** Rechnet alle Zeilen eines Projekts zu einem Stereo-Signal (44,1 kHz, 16 Bit) zusammen. */
 class MixRenderer(
     context: Context,
@@ -254,12 +284,15 @@ class MixRenderer(
         val track: Track,
         val clips: List<Clip>,
         val eq: Array<BandFilter?>?,
+        val radio: RadioFx?,
         val delay: DelayFx?,
         val reverb: ReverbFx?,
+        val spatial: SpatialFx?,
         val start: Double,
         val end: Double
     ) {
-        val hasFx: Boolean get() = eq != null || delay != null || reverb != null
+        val hasFx: Boolean
+            get() = eq != null || radio != null || delay != null || reverb != null || spatial != null
     }
 
     private val appContext = context.applicationContext
@@ -270,20 +303,27 @@ class MixRenderer(
         .filter { !it.muted && it.volume > 0 }
         .map { t ->
             val eqOn = t.hasEq && "pitch" !in t.fxOff
+            val radioOn = "radio" !in t.fxOff && t.radio[0] > 0.0
             val delayOn = "delay" !in t.fxOff && t.delay[2] > 0.0
             val reverbOn = "reverb" !in t.fxOff && t.reverbLevel > 0.0
+            val spatialOn = "3d" !in t.fxOff && t.threeDPos != 0
             Lane(
                 t,
                 t.clips.filter { !it.muted }.flatMap { it.tiles() },
                 if (eqOn) Array(3) { b -> makeBand(b, t.eqGain[b], 44100) } else null,
+                if (radioOn) RadioFx() else null,
                 if (delayOn) DelayFx(RATE) else null,
                 if (reverbOn) ReverbFx(t.reverbPreset) else null,
+                if (spatialOn) SpatialFx() else null,
                 t.extentStart,
                 t.extentEnd
             )
         }
 
     val framesPerBar: Double = 240.0 / bpm * RATE
+
+    /** Tiefpass-Koeffizient für die Klangfarbe von vorne/hinten (ca. 2,2 kHz). */
+    private val spatialLpCoef: Float = (1.0 - Math.exp(-2.0 * Math.PI * 2200.0 / RATE)).toFloat()
 
     /** Echo und Nachhall klingen nach dem letzten Block weiter. */
     private val fxTailFrames: Long = lanes.maxOfOrNull { lane ->
@@ -375,14 +415,30 @@ class MixRenderer(
         return x + w * (y - x)
     }
 
-    /** Wendet nacheinander Tonhöhen, Delay und Reverb der Zeile an und addiert das Ergebnis zu [dst]. */
+    /** Verzerrung mit anschließendem Tiefpass (Tone). */
+    private fun radioChannel(f: RadioFx, ch: Int, x: Float, drive: Float, a: Float): Float {
+        val shaped = tanh(drive * x / 32768f) * 32768f * 0.6f
+        f.s1[ch] += a * (shaped - f.s1[ch])
+        f.s2[ch] += a * (f.s1[ch] - f.s2[ch])
+        return f.s2[ch]
+    }
+
+    /**
+     * Wendet nacheinander Tonhöhen, Radio, Delay, Reverb und 3D der Zeile an
+     * und addiert das Ergebnis zu [dst].
+     */
     private fun applyFx(lane: Lane, startFrame: Long, count: Int, src: IntArray, dst: IntArray) {
         val tr = lane.track
         val eq = lane.eq
+        val radio = lane.radio
         val delay = lane.delay
         val reverb = lane.reverb
+        val spatial = lane.spatial
+        val laneStartFrame = (lane.start * framesPerBar).toLong()
+
         for (fr in 0 until count) {
-            val bar = (startFrame + fr) / framesPerBar
+            val frame = startFrame + fr
+            val bar = frame / framesPerBar
             var l = src[fr * 2].toFloat()
             var r = src[fr * 2 + 1].toFloat()
 
@@ -392,6 +448,21 @@ class MixRenderer(
                 val w2 = fadeWeight(lane, tr.eqFadeIn[2], tr.eqFadeOut[2], bar)
                 l = stage(eq[2], 0, stage(eq[1], 0, stage(eq[0], 0, l, w0), w1), w2)
                 r = stage(eq[2], 1, stage(eq[1], 1, stage(eq[0], 1, r, w0), w1), w2)
+            }
+
+            if (radio != null) {
+                val wGain = fadeWeight(lane, tr.radioFadeIn[0], tr.radioFadeOut[0], bar)
+                val wTone = fadeWeight(lane, tr.radioFadeIn[1], tr.radioFadeOut[1], bar)
+                val gain = (tr.radio[0] * wGain).toFloat()
+                if (gain > 0.001f) {
+                    // Tone: neutral = hell (1); mit Verlauf blendet die Klangfarbe ein
+                    val tone = (1.0 - (1.0 - tr.radio[1]) * wTone).toFloat()
+                    val drive = 1f + gain * 24f
+                    val fc = 500f + tone * tone * 14000f
+                    val a = (1.0 - Math.exp(-2.0 * Math.PI * fc / RATE)).toFloat()
+                    l = radioChannel(radio, 0, l, drive, a)
+                    r = radioChannel(radio, 1, r, drive, a)
+                }
             }
 
             if (delay != null) {
@@ -413,6 +484,36 @@ class MixRenderer(
                 reverb.process((l + r) * 0.5f)
                 l += reverb.outL * level * 3f
                 r += reverb.outR * level * 3f
+            }
+
+            if (spatial != null) {
+                val a = tr.threeDPos
+                val b = oppositePos(a)
+                // Acid: wechselt zwischen der gewählten Seite (zuerst) und ihrer Gegenseite
+                var target = 0f
+                if (tr.threeDAcid > 0.0) {
+                    val hz = 0.25 + 11.75 * tr.threeDAcid * tr.threeDAcid
+                    val rel = maxOf(0L, frame - laneStartFrame)
+                    val phase = (rel.toDouble() / RATE * hz) % 1.0
+                    target = if (phase < 0.5) 0f else 1f
+                }
+                val step = 1f / (0.006f * RATE)
+                spatial.mix += (target - spatial.mix).coerceIn(-step, step)
+                val m = spatial.mix
+
+                val gl = POS_GAIN_L[a] + (POS_GAIN_L[b] - POS_GAIN_L[a]) * m
+                val gr = POS_GAIN_R[a] + (POS_GAIN_R[b] - POS_GAIN_R[a]) * m
+                val dark = POS_DARK[a] + (POS_DARK[b] - POS_DARK[a]) * m
+                val bright = POS_BRIGHT[a] + (POS_BRIGHT[b] - POS_BRIGHT[a]) * m
+
+                spatial.lpL += spatialLpCoef * (l - spatial.lpL)
+                spatial.lpR += spatialLpCoef * (r - spatial.lpR)
+                var yl = l + bright * (l - spatial.lpL)
+                var yr = r + bright * (r - spatial.lpR)
+                yl = yl * (1f - dark) + spatial.lpL * dark
+                yr = yr * (1f - dark) + spatial.lpR * dark
+                l = yl * gl
+                r = yr * gr
             }
 
             dst[fr * 2] += l.toInt()
