@@ -109,154 +109,108 @@ class ProjectEditor(
 
     // ---------- Effekte (gelten für alle ausgewählten Zeilen) ----------
 
-    /** Equalizer-Band (0 Treble, 1 Mid, 2 Bass) in dB. */
-    fun setEqGain(band: Int, db: Int) {
+    private fun mapSelected(change: (Track) -> Track) {
         update(
             project.copy(
-                tracks = tracks.map { t ->
-                    if (t.id in selectedTrackIds) {
-                        t.copy(eqGain = t.eqGain.toMutableList().also { it[band] = db.coerceIn(-12, 12) })
-                    } else {
-                        t
-                    }
-                }
+                tracks = tracks.map { if (it.id in selectedTrackIds) change(it) else it }
             )
         )
     }
 
+    /** Equalizer-Band (0 Treble, 1 Mid, 2 Bass) in dB. */
+    fun setEqGain(band: Int, db: Int) = mapSelected { t ->
+        t.copy(eqGain = t.eqGain.toMutableList().also { it[band] = db.coerceIn(-12, 12) })
+    }
+
     /** Verlauf eines Equalizer-Bands (Takte, bezogen auf die ganze Zeile). */
-    fun setEqFade(band: Int, fadeInBars: Double, fadeOutBars: Double) {
-        update(
-            project.copy(
-                tracks = tracks.map { t ->
-                    if (t.id in selectedTrackIds) {
-                        t.copy(
-                            eqFadeIn = t.eqFadeIn.toMutableList().also { it[band] = fadeInBars },
-                            eqFadeOut = t.eqFadeOut.toMutableList().also { it[band] = fadeOutBars }
-                        )
-                    } else {
-                        t
-                    }
-                }
-            )
+    fun setEqFade(band: Int, fadeInBars: Double, fadeOutBars: Double) = mapSelected { t ->
+        t.copy(
+            eqFadeIn = t.eqFadeIn.toMutableList().also { it[band] = fadeInBars },
+            eqFadeOut = t.eqFadeOut.toMutableList().also { it[band] = fadeOutBars }
         )
     }
 
     /** Delay-Regler (0 Decay, 1 Time, 2 Mix), Wert 0 bis 1. */
-    fun setDelay(param: Int, value: Double) {
-        update(
-            project.copy(
-                tracks = tracks.map { t ->
-                    if (t.id in selectedTrackIds) {
-                        t.copy(delay = t.delay.toMutableList().also { it[param] = value.coerceIn(0.0, 1.0) })
-                    } else {
-                        t
-                    }
-                }
-            )
+    fun setDelay(param: Int, value: Double) = mapSelected { t ->
+        t.copy(delay = t.delay.toMutableList().also { it[param] = value.coerceIn(0.0, 1.0) })
+    }
+
+    fun setDelayFade(param: Int, fadeInBars: Double, fadeOutBars: Double) = mapSelected { t ->
+        t.copy(
+            delayFadeIn = t.delayFadeIn.toMutableList().also { it[param] = fadeInBars },
+            delayFadeOut = t.delayFadeOut.toMutableList().also { it[param] = fadeOutBars }
         )
     }
 
-    fun setDelayFade(param: Int, fadeInBars: Double, fadeOutBars: Double) {
-        update(
-            project.copy(
-                tracks = tracks.map { t ->
-                    if (t.id in selectedTrackIds) {
-                        t.copy(
-                            delayFadeIn = t.delayFadeIn.toMutableList().also { it[param] = fadeInBars },
-                            delayFadeOut = t.delayFadeOut.toMutableList().also { it[param] = fadeOutBars }
-                        )
-                    } else {
-                        t
-                    }
-                }
-            )
+    fun setReverbLevel(level: Double) = mapSelected { t ->
+        t.copy(reverbLevel = level.coerceIn(0.0, 1.0))
+    }
+
+    fun setReverbFade(fadeInBars: Double, fadeOutBars: Double) = mapSelected { t ->
+        t.copy(reverbFadeIn = fadeInBars, reverbFadeOut = fadeOutBars)
+    }
+
+    fun setReverbPreset(index: Int) = mapSelected { t ->
+        t.copy(reverbPreset = index.coerceIn(0, 5))
+    }
+
+    /** Radio-Regler (0 Gain, 1 Tone), Wert 0 bis 1. */
+    fun setRadio(param: Int, value: Double) = mapSelected { t ->
+        t.copy(radio = t.radio.toMutableList().also { it[param] = value.coerceIn(0.0, 1.0) })
+    }
+
+    fun setRadioFade(param: Int, fadeInBars: Double, fadeOutBars: Double) = mapSelected { t ->
+        t.copy(
+            radioFadeIn = t.radioFadeIn.toMutableList().also { it[param] = fadeInBars },
+            radioFadeOut = t.radioFadeOut.toMutableList().also { it[param] = fadeOutBars }
         )
     }
 
-    fun setReverbLevel(level: Double) {
-        update(
-            project.copy(
-                tracks = tracks.map { t ->
-                    if (t.id in selectedTrackIds) t.copy(reverbLevel = level.coerceIn(0.0, 1.0)) else t
-                }
-            )
-        )
-    }
+    /** 3D-Position: 0 Mitte, 1 vorne, 2 rechts, 3 links, 4 hinten. */
+    fun setThreeDPos(pos: Int) = mapSelected { t -> t.copy(threeDPos = pos.coerceIn(0, 4)) }
 
-    fun setReverbFade(fadeInBars: Double, fadeOutBars: Double) {
-        update(
-            project.copy(
-                tracks = tracks.map { t ->
-                    if (t.id in selectedTrackIds) {
-                        t.copy(reverbFadeIn = fadeInBars, reverbFadeOut = fadeOutBars)
-                    } else {
-                        t
-                    }
-                }
-            )
-        )
-    }
+    fun setThreeDAcid(value: Double) = mapSelected { t -> t.copy(threeDAcid = value.coerceIn(0.0, 1.0)) }
 
-    fun setReverbPreset(index: Int) {
-        update(
-            project.copy(
-                tracks = tracks.map { t ->
-                    if (t.id in selectedTrackIds) t.copy(reverbPreset = index.coerceIn(0, 5)) else t
-                }
-            )
-        )
-    }
-
-    /** Schaltet einen Effekt ("pitch", "delay", "reverb") an oder aus (Standard: an). */
-    fun setFxEnabled(key: String, enabled: Boolean) {
-        update(
-            project.copy(
-                tracks = tracks.map { t ->
-                    if (t.id in selectedTrackIds) {
-                        t.copy(fxOff = if (enabled) t.fxOff - key else t.fxOff + key)
-                    } else {
-                        t
-                    }
-                }
-            )
-        )
+    /** Schaltet einen Effekt ("pitch", "delay", "reverb", "radio", "3d") an oder aus (Standard: an). */
+    fun setFxEnabled(key: String, enabled: Boolean) = mapSelected { t ->
+        t.copy(fxOff = if (enabled) t.fxOff - key else t.fxOff + key)
     }
 
     /** Setzt einen Effekt auf die Standardeinstellungen zurück (und schaltet ihn an). */
-    fun resetEffect(key: String) {
-        update(
-            project.copy(
-                tracks = tracks.map { t ->
-                    if (t.id !in selectedTrackIds) {
-                        t
-                    } else {
-                        when (key) {
-                            "pitch" -> t.copy(
-                                eqGain = listOf(0, 0, 0),
-                                eqFadeIn = listOf(0.0, 0.0, 0.0),
-                                eqFadeOut = listOf(0.0, 0.0, 0.0),
-                                fxOff = t.fxOff - key
-                            )
-                            "delay" -> t.copy(
-                                delay = FxDefaults.DELAY,
-                                delayFadeIn = listOf(0.0, 0.0, 0.0),
-                                delayFadeOut = listOf(0.0, 0.0, 0.0),
-                                fxOff = t.fxOff - key
-                            )
-                            "reverb" -> t.copy(
-                                reverbLevel = 0.0,
-                                reverbFadeIn = 0.0,
-                                reverbFadeOut = 0.0,
-                                reverbPreset = FxDefaults.REVERB_PRESET,
-                                fxOff = t.fxOff - key
-                            )
-                            else -> t
-                        }
-                    }
-                }
+    fun resetEffect(key: String) = mapSelected { t ->
+        when (key) {
+            "pitch" -> t.copy(
+                eqGain = listOf(0, 0, 0),
+                eqFadeIn = listOf(0.0, 0.0, 0.0),
+                eqFadeOut = listOf(0.0, 0.0, 0.0),
+                fxOff = t.fxOff - key
             )
-        )
+            "delay" -> t.copy(
+                delay = FxDefaults.DELAY,
+                delayFadeIn = listOf(0.0, 0.0, 0.0),
+                delayFadeOut = listOf(0.0, 0.0, 0.0),
+                fxOff = t.fxOff - key
+            )
+            "reverb" -> t.copy(
+                reverbLevel = 0.0,
+                reverbFadeIn = 0.0,
+                reverbFadeOut = 0.0,
+                reverbPreset = FxDefaults.REVERB_PRESET,
+                fxOff = t.fxOff - key
+            )
+            "radio" -> t.copy(
+                radio = FxDefaults.RADIO,
+                radioFadeIn = listOf(0.0, 0.0),
+                radioFadeOut = listOf(0.0, 0.0),
+                fxOff = t.fxOff - key
+            )
+            "3d" -> t.copy(
+                threeDPos = 0,
+                threeDAcid = 0.0,
+                fxOff = t.fxOff - key
+            )
+            else -> t
+        }
     }
 
     /** Ein-/Ausblenden eines Blocks. Alle Änderungen bis [endPatternEdit] sind ein Rückgängig-Schritt. */
@@ -285,7 +239,9 @@ class ProjectEditor(
         delayFadeIn = t.delayFadeIn.map { it * factor },
         delayFadeOut = t.delayFadeOut.map { it * factor },
         reverbFadeIn = t.reverbFadeIn * factor,
-        reverbFadeOut = t.reverbFadeOut * factor
+        reverbFadeOut = t.reverbFadeOut * factor,
+        radioFadeIn = t.radioFadeIn.map { it * factor },
+        radioFadeOut = t.radioFadeOut.map { it * factor }
     )
 
     fun applyProjectBpm(newBpm: Int, changedRowIds: Set<String>) {
@@ -589,7 +545,12 @@ class ProjectEditor(
                     reverbLevel = current.reverbLevel,
                     reverbFadeIn = current.reverbFadeIn,
                     reverbFadeOut = current.reverbFadeOut,
-                    reverbPreset = current.reverbPreset
+                    reverbPreset = current.reverbPreset,
+                    radio = current.radio,
+                    radioFadeIn = current.radioFadeIn,
+                    radioFadeOut = current.radioFadeOut,
+                    threeDPos = current.threeDPos,
+                    threeDAcid = current.threeDAcid
                 )
             } else {
                 s
