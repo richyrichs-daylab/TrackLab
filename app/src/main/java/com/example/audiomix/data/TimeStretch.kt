@@ -103,11 +103,14 @@ object TimeStretch {
         val ha = HS * speed
         val len = N / DEC
 
+        val seg = ShortArray(N * 2)
         fun addSegment(start: Int, first: Boolean) {
+            data.position(start * 2)
+            data.get(seg, 0, N * 2)
             for (i in 0 until N) {
                 val w = if (first && i < HS) 1f else win[i]
-                accL[i] += data.get((start + i) * 2) * w
-                accR[i] += data.get((start + i) * 2 + 1) * w
+                accL[i] += seg[i * 2] * w
+                accR[i] += seg[i * 2 + 1] * w
             }
         }
 
@@ -143,12 +146,16 @@ object TimeStretch {
                 val cEnd = hi / DEC
                 while (c <= cEnd) {
                     var score = 0f
-                    for (i in 0 until len) score += dm[c + i] * dm[tdm + i]
+                    var i = 0
+                    while (i < len) {
+                        score += dm[c + i] * dm[tdm + i]
+                        i += 2
+                    }
                     if (score > bestScore) {
                         bestScore = score
                         best = c * DEC
                     }
-                    c++
+                    c += 2
                 }
             }
 
