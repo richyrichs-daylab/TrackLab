@@ -3,18 +3,23 @@ package com.example.audiomix.data
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.os.Process
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class MixPlayer {
 
     private var track: AudioTrack? = null
     private var scope: CoroutineScope? = null
+    private var executor: ExecutorService? = null
 
     @Volatile
     private var writtenFrames = 0L
@@ -35,7 +40,7 @@ class MixPlayer {
             AudioFormat.CHANNEL_OUT_STEREO,
             AudioFormat.ENCODING_PCM_16BIT
         )
-        val bufferBytes = maxOf(minBuffer, rate * 4 / 2)
+        val bufferBytes = maxOf(minBuffer, rate * 4)
 
         val audioTrack = AudioTrack.Builder()
             .setAudioAttributes(
@@ -56,7 +61,14 @@ class MixPlayer {
             .build()
         track = audioTrack
 
-        val newScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val exec = Executors.newSingleThreadExecutor { r ->
+            Thread {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+                r.run()
+            }
+        }
+        executor = exec
+        val newScope = CoroutineScope(SupervisorJob() + exec.asCoroutineDispatcher())
         scope = newScope
         newScope.launch {
             try {
@@ -112,6 +124,8 @@ class MixPlayer {
     fun stop() {
         scope?.cancel()
         scope = null
+        executor?.shutdown()
+        executor = null
         val t = track
         track = null
         if (t != null) {
