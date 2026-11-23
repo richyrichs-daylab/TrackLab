@@ -119,7 +119,7 @@ class ProjectEditor(
 
     /** Equalizer-Band (0 Treble, 1 Mid, 2 Bass) in dB. */
     fun setEqGain(band: Int, db: Int) = mapSelected { t ->
-        t.copy(eqGain = t.eqGain.toMutableList().also { it[band] = db.coerceIn(-12, 12) })
+        t.copy(eqGain = t.eqGain.toMutableList().also { it[band] = db.coerceIn(if (band == 1) -12 else -24, if (band == 1) 12 else 24) })
     }
 
     /** Verlauf eines Equalizer-Bands (Takte, bezogen auf die ganze Zeile). */
