@@ -760,6 +760,11 @@ fun ProjectScreen(
                         type = patternBlock.first.type,
                         clip = patternBlock.second,
                         muted = patternBlock.first.muted || patternBlock.second.muted,
+                        instrument = patternBlock.second.instrument,
+                        onInstrument = { inst ->
+                            editor.setClipInstrument(patternBlock.first.id, patternBlock.second.id, inst)
+                            SoundPreview.play(Sounds.lane(patternBlock.first.type, 5, inst))
+                        },
                         onToggle = { lane, cell ->
                             val on = editor.togglePatternCell(
                                 patternBlock.first.id,
@@ -767,7 +772,7 @@ fun ProjectScreen(
                                 lane,
                                 cell
                             )
-                            if (on) SoundPreview.play(Sounds.lane(patternBlock.first.type, lane))
+                            if (on) SoundPreview.play(Sounds.lane(patternBlock.first.type, lane, patternBlock.second.instrument))
                         },
                         modifier = Modifier
                             .align(Alignment.TopCenter)
