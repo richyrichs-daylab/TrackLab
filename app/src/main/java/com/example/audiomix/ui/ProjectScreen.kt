@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -149,6 +150,14 @@ fun ProjectScreen(
     var rollOpen by remember { mutableStateOf(false) }
     var fadeOpen by remember { mutableStateOf(false) }
     var copyConfirm by remember { mutableStateOf(false) }
+    var prepPercent by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val v = AudioImport.progress.get()
+            prepPercent = if (v >= 0) v else null
+            kotlinx.coroutines.delay(150)
+        }
+    }
     var effectsOpen by remember { mutableStateOf(false) }
     var effectTab by remember { mutableIntStateOf(0) }
     var fxVerlauf by remember { mutableStateOf<Int?>(null) }
@@ -767,6 +776,17 @@ fun ProjectScreen(
                     peaks = peaks,
                     modifier = Modifier.fillMaxSize()
                 )
+                val prep = prepPercent
+                if (prep != null) {
+                    ProgressBar(
+                        percent = prep,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 14.dp)
+                            .width(280.dp)
+                            .height(34.dp)
+                    )
+                }
                 if (rollOpen && patternBlock != null) {
                     PatternRoll(
                         type = patternBlock.first.type,
@@ -1199,11 +1219,9 @@ private fun LoadingLayer(percent: Int) {
         }
 
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = "$percent %",
-                color = colors.onBackground,
-                fontSize = 48.sp,
-                fontWeight = FontWeight.Black
+            ProgressBar(
+                percent = percent,
+                modifier = Modifier.width(300.dp).height(46.dp)
             )
             Spacer(Modifier.height(16.dp))
             Text(
@@ -1214,5 +1232,34 @@ private fun LoadingLayer(percent: Int) {
                 modifier = Modifier.padding(horizontal = 40.dp)
             )
         }
+    }
+}
+
+/** Ladebalken mit dem Prozentwert in der Mitte. */
+@Composable
+private fun ProgressBar(percent: Int, modifier: Modifier = Modifier) {
+    val colors = LocalAppColors.current
+    val p = percent.coerceIn(0, 100)
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .background(colors.onBackground.copy(alpha = 0.18f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .fillMaxHeight()
+                .fillMaxWidth((p / 100f).coerceIn(0.02f, 1f))
+                .background(
+                    Brush.horizontalGradient(listOf(Color(0xFFFFB3C7), Color(0xFFE8607A), Color(0xFF8E2C75)))
+                )
+        )
+        Text(
+            text = "$p %",
+            color = colors.onBackground,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Black
+        )
     }
 }
