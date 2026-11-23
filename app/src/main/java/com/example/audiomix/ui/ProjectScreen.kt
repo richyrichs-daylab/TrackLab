@@ -484,20 +484,31 @@ fun ProjectScreen(
 
     // Wellenform-Daten laden
     LaunchedEffect(editor.project.tracks) {
-        val needed = editor.tracks
-            .flatMap { it.clips }
-            .mapNotNull { it.sourceFile }
-            .distinct()
-            .filter { it !in peaks }
-        for (name in needed) {
-            val data = withContext(Dispatchers.IO) { AudioFiles.loadPeaks(context, project.id, name) }
-            if (data != null) peaks[name] = data
+        var tries = 0
+        while (tries < 900) {
+            val needed = editor.tracks
+                .flatMap { it.clips }
+                .mapNotNull { it.sourceFile }
+                .distinct()
+                .filter { it !in peaks }
+            if (needed.isEmpty()) break
+            for (name in needed) {
+                val data = withContext(Dispatchers.IO) { AudioFiles.loadPeaks(context, project.id, name) }
+                if (data != null) peaks[name] = data
+            }
+            // Wellenform kommt, sobald die Datei im Hintergrund fertig ist
+            if (needed.all { it in peaks }) break
+            kotlinx.coroutines.delay(500)
+            tries++
         }
     }
 
     // Abspielen: Ton läuft, der Cursor folgt dem Ton
     LaunchedEffect(playing, restartKey, mixKey) {
         if (playing) {
+            if (AudioImport.preparing.get() > 0) {
+                Toast.makeText(context, "Audio wird noch vorbereitet …", Toast.LENGTH_SHORT).show()
+            }
             val renderer = MixRenderer(context, project.id, editor.tracks, editor.project.bpm)
             try {
                 val ok = withContext(Dispatchers.IO) { renderer.prepare() }
