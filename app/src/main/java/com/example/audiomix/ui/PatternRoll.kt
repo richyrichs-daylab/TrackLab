@@ -3,6 +3,9 @@ package com.example.audiomix.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
@@ -79,12 +82,14 @@ fun PatternRoll(
     type: TrackType,
     clip: Clip,
     muted: Boolean,
+    instrument: Int = 0,
+    onInstrument: (Int) -> Unit = {},
     onToggle: (lane: Int, cell: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val colors = LocalAppColors.current
     val measurer = rememberTextMeasurer()
-    val names = Sounds.laneNames(type)
+    val names = Sounds.laneNames(type, instrument)
     val laneCount = names.size
     val cells = patternCells(clip.lengthBar, clip.stretch)
     val cellBars = 1.0 / (16.0 * clip.stretch)
@@ -105,6 +110,32 @@ fun PatternRoll(
             .heightIn(max = 250.dp)
             .background(colors.timelineBg)
     ) {
+      Column {
+        if (type == TrackType.SYNTH) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Sounds.INSTRUMENTS.forEachIndexed { i, label ->
+                    val sel = i == instrument
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(if (sel) Color.Black else colors.onBackground.copy(alpha = 0.12f))
+                            .clickable { onInstrument(i) }
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (sel) Color(0xFFE8607A) else colors.onBackground,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -204,5 +235,6 @@ fun PatternRoll(
                 }
             }
         }
+      }
     }
 }
