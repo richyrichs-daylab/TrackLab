@@ -15,6 +15,11 @@ class StreamResampler(inRate: Int, outRate: Int) {
     }
 
     fun feed(l: Int, r: Int, out: (Int, Int) -> Unit) {
+        // Gleiche Abtastrate: einfach durchreichen (viel schneller)
+        if (ratio == 1.0) {
+            out(l, r)
+            return
+        }
         if (inIndex == 0L) {
             prevL = l
             prevR = r
