@@ -55,7 +55,9 @@ data class Clip(
     val pattern: Set<Int> = emptySet(),
     /** Länge des Einblendens und Ausblendens in Takten. */
     val fadeIn: Double = 0.0,
-    val fadeOut: Double = 0.0
+    val fadeOut: Double = 0.0,
+    /** Nur Synth-Blöcke: 0 = Synth, 1 = Piano, 2 = Bass. */
+    val instrument: Int = 0
 ) {
     val tileEnd: Double get() = startBar + lengthBar
 
@@ -105,6 +107,7 @@ data class Clip(
         put("fadeIn", fadeIn)
         put("fadeOut", fadeOut)
         put("patternV", 2)
+        put("instrument", instrument)
         put("pattern", JSONArray().apply { pattern.sorted().forEach { put(it) } })
         if (sourceFile != null) put("sourceFile", sourceFile)
     }
@@ -160,7 +163,8 @@ data class Clip(
                 muted = o.optBoolean("muted", false),
                 pattern = pattern,
                 fadeIn = o.optDouble("fadeIn", 0.0),
-                fadeOut = o.optDouble("fadeOut", 0.0)
+                fadeOut = o.optDouble("fadeOut", 0.0),
+                instrument = o.optInt("instrument", 0)
             )
         }
     }
