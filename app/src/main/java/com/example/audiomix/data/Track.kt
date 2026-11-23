@@ -221,7 +221,9 @@ data class Track(
     val radioFadeOut: List<Double> = listOf(0.0, 0.0),
     /** 3D: Position (0 Mitte, 1 vorne, 2 rechts, 3 links, 4 hinten) und Acid (0 bis 1). */
     val threeDPos: Int = 0,
-    val threeDAcid: Double = 0.0
+    val threeDAcid: Double = 0.0,
+    /** Acid taktgleich (Stufen passend zum Takt). Standard: an. */
+    val acidSync: Boolean = true
 ) {
     fun tempo(projectBpm: Int): Double = if (bpm > 0.0) bpm else projectBpm.toDouble()
 
@@ -253,6 +255,7 @@ data class Track(
         put("radioFadeOut", JSONArray().apply { radioFadeOut.forEach { put(it) } })
         put("threeDPos", threeDPos)
         put("threeDAcid", threeDAcid)
+        put("acidSync", acidSync)
         if (name != null) put("name", name)
         put("clips", JSONArray().apply { clips.forEach { put(it.toJson()) } })
     }
@@ -306,7 +309,8 @@ data class Track(
                 radioFadeIn = o.doubleList("radioFadeIn", zero2),
                 radioFadeOut = o.doubleList("radioFadeOut", zero2),
                 threeDPos = o.optInt("threeDPos", 0),
-                threeDAcid = o.optDouble("threeDAcid", 0.0)
+                threeDAcid = o.optDouble("threeDAcid", 0.0),
+                acidSync = o.optBoolean("acidSync", true)
             )
         }
     }
