@@ -148,6 +148,7 @@ fun ProjectScreen(
     var volumeOpen by remember { mutableStateOf(false) }
     var rollOpen by remember { mutableStateOf(false) }
     var fadeOpen by remember { mutableStateOf(false) }
+    var copyConfirm by remember { mutableStateOf(false) }
     var effectsOpen by remember { mutableStateOf(false) }
     var effectTab by remember { mutableIntStateOf(0) }
     var fxVerlauf by remember { mutableStateOf<Int?>(null) }
@@ -189,7 +190,7 @@ fun ProjectScreen(
         listOf(
             t.muted, t.volume, t.clips.map { it.muted },
             t.eqGain, t.fxOff, t.delay, t.reverbLevel, t.reverbPreset,
-            t.radio, t.threeDPos, t.threeDAcid
+            t.radio, t.threeDPos, t.threeDAcid, t.acidSync
         )
     }
 
@@ -834,7 +835,7 @@ fun ProjectScreen(
                                     val error = editor.splitSelectedClip()
                                     if (error != null) Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
                                 },
-                                onCopy = { copyBlock(false) },
+                                onCopy = { copyConfirm = true },
                                 onCut = { copyBlock(true) },
                                 onStretch = { timeline.stretchMode = true },
                                 onStretchCancel = { cancelStretch() },
@@ -1076,6 +1077,24 @@ fun ProjectScreen(
                     bpmQuestion = null
                     runBpmChange(question, false)
                 }) { Text("Nein") }
+            }
+        )
+    }
+
+    // ---- Kopieren bestätigen ----
+    if (copyConfirm) {
+        AlertDialog(
+            onDismissRequest = { copyConfirm = false },
+            title = { Text("Block kopieren?") },
+            text = { Text("Der ausgewählte Block wird in die Zwischenablage kopiert.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    copyConfirm = false
+                    copyBlock(false)
+                }) { Text("Kopieren") }
+            },
+            dismissButton = {
+                TextButton(onClick = { copyConfirm = false }) { Text("Abbrechen") }
             }
         )
     }
