@@ -572,11 +572,11 @@ fun Timeline(
                                         if (pos >= tile.endBar - 1e-9) continue
                                         val hx = (pos * barPx - scroll).toFloat()
                                         if (hx + tw < 0f || hx > w) continue
-                                        drawRoundRect(
-                                            tickColor.copy(alpha = fade),
+                                        drawRect(
+                                            tickColor,
                                             Offset(hx, top + 8.dp.toPx() + lane * bandH + bandH * 0.15f),
                                             Size(tw, bandH * 0.7f),
-                                            CornerRadius(2.dp.toPx())
+                                            alpha = fade
                                         )
                                     }
                                 } else {
