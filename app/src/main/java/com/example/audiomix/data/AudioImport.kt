@@ -52,7 +52,15 @@ object AudioImport {
 
     private class Analysis(val durationSec: Double, val peaks: ByteArray)
 
-    /** Kopiert die gewählte Datei (MP3, WAV, Opus ...) ins Projekt. Null, wenn sie nicht lesbar ist. */
+    /** Wie viele Dateien gerade im Hintergrund für das Abspielen vorbereitet werden. */
+    val preparing = java.util.concurrent.atomic.AtomicInteger(0)
+
+    private val locks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+    /**
+     * Kopiert die gewählte Datei (MP3, WAV, Opus ...) ins Projekt. Null, wenn sie nicht lesbar ist.
+     * Die Datei ist sofort bearbeitbar; Wellenform und Abspiel-Datei entstehen im Hintergrund.
+     */
     fun importAudio(context: Context, uri: Uri, projectId: String): Imported? {
         val dir = AudioFiles.dir(context, projectId)
         val id = UUID.randomUUID().toString()
@@ -67,22 +75,74 @@ object AudioImport {
             stream.use { input ->
                 target.outputStream().buffered(262144).use { output -> input.copyTo(output, 262144) }
             }
-            // Nur ein Durchgang: Wellenform und mischfertige Rohdatei entstehen gleichzeitig
-            val pcm = File(dir, id + ".pcm")
-            val tmp = File(dir, pcm.name + ".tmp")
-            val analysis = analyzeAndConvert(target, tmp)
+            val quick = quickDuration(target)
+            if (quick != null) {
+                // Sofort fertig; das Dekodieren läuft im Hintergrund weiter
+                preparing.incrementAndGet()
+                Thread {
+                    try {
+                        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_FOREGROUND)
+                        ensurePcm(context, projectId, target.name)
+                    } catch (e: Exception) {
+                        // ignorieren
+                    } finally {
+                        preparing.decrementAndGet()
+                    }
+                }.start()
+                return Imported(target.name, quick)
+            }
+            // Dauer unbekannt: einmal ganz dekodieren
+            val analysis = synchronized(lockFor(dir, target.name)) { convertAll(dir, target) }
             if (analysis == null) {
-                tmp.delete()
                 target.delete()
                 return null
             }
-            File(dir, "$id.peaks").writeBytes(analysis.peaks)
-            tmp.renameTo(pcm)
             return Imported(target.name, analysis.durationSec)
         } catch (e: Exception) {
             target.delete()
             return null
         }
+    }
+
+    private fun lockFor(dir: File, fileName: String): Any =
+        locks.getOrPut(File(dir, fileName.substringBeforeLast('.')).path) { Any() }
+
+    /** Dauer in Sekunden direkt aus der Datei (ohne Dekodieren), oder null. */
+    private fun quickDuration(file: File): Double? {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(file.absolutePath)
+            var result: Double? = null
+            for (i in 0 until extractor.trackCount) {
+                val f = extractor.getTrackFormat(i)
+                val m = f.getString(MediaFormat.KEY_MIME) ?: continue
+                if (m.startsWith("audio/") && f.containsKey(MediaFormat.KEY_DURATION)) {
+                    val us = f.getLong(MediaFormat.KEY_DURATION)
+                    if (us > 0L) result = us / 1_000_000.0
+                    break
+                }
+            }
+            result
+        } catch (e: Exception) {
+            null
+        } finally {
+            extractor.release()
+        }
+    }
+
+    /** Dekodiert einmal ganz: schreibt Rohdatei und Wellenform. */
+    private fun convertAll(dir: File, source: File): Analysis? {
+        val base = source.name.substringBeforeLast('.')
+        val pcm = File(dir, "$base.pcm")
+        val tmp = File(dir, pcm.name + ".tmp")
+        val analysis = analyzeAndConvert(source, tmp)
+        if (analysis == null || !source.exists()) {
+            tmp.delete()
+            return null
+        }
+        File(dir, "$base.peaks").writeBytes(analysis.peaks)
+        tmp.renameTo(pcm)
+        return analysis
     }
 
     private fun displayName(context: Context, uri: Uri): String? = try {
@@ -93,20 +153,17 @@ object AudioImport {
         null
     }
 
-    /** Liefert die mischfertige Rohdatei (44,1 kHz, Stereo, 16 Bit) und erzeugt sie bei Bedarf. */
+    /** Liefert die mischfertige Rohdatei (44,1 kHz, Stereo, 16 Bit) und erzeugt sie bei Bedarf (wartet auf eine laufende Vorbereitung). */
     fun ensurePcm(context: Context, projectId: String, fileName: String): File? {
         val dir = AudioFiles.dir(context, projectId)
         val source = File(dir, fileName)
         val pcm = File(dir, fileName.substringBeforeLast('.') + ".pcm")
         if (pcm.exists() && pcm.length() > 0L) return pcm
-        if (!source.exists()) return null
-        val tmp = File(dir, pcm.name + ".tmp")
-        if (analyzeAndConvert(source, tmp) == null) {
-            tmp.delete()
-            return null
+        synchronized(lockFor(dir, fileName)) {
+            if (pcm.exists() && pcm.length() > 0L) return pcm
+            if (!source.exists()) return null
+            return if (convertAll(dir, source) != null) pcm else null
         }
-        tmp.renameTo(pcm)
-        return pcm
     }
 
     /** Dekodiert die Datei einmal und liefert Wellenform und Rohdatei (44,1 kHz, Stereo, 16 Bit) zugleich. */
