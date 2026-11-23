@@ -587,8 +587,40 @@ fun EffectsPanel(
                             ParamSlider(
                                 value = track.threeDAcid.toFloat(),
                                 enabled = true,
-                                onChange = { editor.setThreeDAcid(it.toDouble()) }
+                                onChange = {
+                                    // taktgleich: auf 7 Stufen einrasten
+                                    val v = if (track.acidSync) Math.round(it * 7f) / 7f else it
+                                    editor.setThreeDAcid(v.toDouble())
+                                }
                             )
+                            Box(
+                                modifier = Modifier.fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(50))
+                                        .background(
+                                            if (track.acidSync) Color.Black
+                                            else colors.onBackground.copy(alpha = 0.12f)
+                                        )
+                                        .clickable {
+                                            val on = !track.acidSync
+                                            editor.setAcidSync(on)
+                                            if (on) {
+                                                editor.setThreeDAcid(Math.round(track.threeDAcid * 7) / 7.0)
+                                            }
+                                        }
+                                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                                ) {
+                                    Text(
+                                        text = "taktgleich",
+                                        color = if (track.acidSync) PINK else colors.onBackground,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                         }
                     }
                 }
