@@ -344,6 +344,13 @@ class ProjectEditor(
         commitTracks(newTracks)
     }
 
+    /** Wählt das Instrument eines Synth-Blocks (0 Synth, 1 Piano, 2 Bass). */
+    fun setClipInstrument(trackId: String, clipId: String, instrument: Int) {
+        val clip = tracks.firstOrNull { it.id == trackId }?.clips?.firstOrNull { it.id == clipId } ?: return
+        if (clip.instrument == instrument) return
+        replaceClip(trackId, clip.copy(instrument = instrument))
+    }
+
     /** Hängt an den Block genau eine weitere volle Wiederholung an. */
     fun addRepeat(trackId: String, clipId: String) {
         val clip = tracks.firstOrNull { it.id == trackId }?.clips?.firstOrNull { it.id == clipId } ?: return
