@@ -65,15 +65,19 @@ object AudioImport {
         try {
             val stream = context.contentResolver.openInputStream(uri) ?: return null
             stream.use { input ->
-                target.outputStream().use { output -> input.copyTo(output) }
+                target.outputStream().buffered(262144).use { output -> input.copyTo(output, 262144) }
             }
-            val analysis = analyze(target)
+            // Nur ein Durchgang: Wellenform und mischfertige Rohdatei entstehen gleichzeitig
+            val pcm = File(dir, id + ".pcm")
+            val tmp = File(dir, pcm.name + ".tmp")
+            val analysis = analyzeAndConvert(target, tmp)
             if (analysis == null) {
+                tmp.delete()
                 target.delete()
                 return null
             }
             File(dir, "$id.peaks").writeBytes(analysis.peaks)
-            ensurePcm(context, projectId, target.name)
+            tmp.renameTo(pcm)
             return Imported(target.name, analysis.durationSec)
         } catch (e: Exception) {
             target.delete()
@@ -103,6 +107,53 @@ object AudioImport {
         }
         tmp.renameTo(pcm)
         return pcm
+    }
+
+    /** Dekodiert die Datei einmal und liefert Wellenform und Rohdatei (44,1 kHz, Stereo, 16 Bit) zugleich. */
+    private fun analyzeAndConvert(file: File, outFile: File): Analysis? {
+        val peaks = ByteArrayOutputStream()
+        var window = 882
+        var inWindow = 0
+        var windowMax = 0
+        var frames = 0L
+        var rate = 0
+        val stream = FileOutputStream(outFile)
+        try {
+            val writer = PcmWriter(stream)
+            val resampler = StreamResampler(TARGET_RATE, TARGET_RATE)
+            val ok = decodeFrames(file, { r ->
+                rate = r
+                window = maxOf(1, r / PEAKS_PER_SECOND)
+                resampler.setInRate(r, TARGET_RATE)
+            }) { l, r ->
+                val m = maxOf(abs(l), abs(r))
+                if (m > windowMax) windowMax = m
+                inWindow++
+                frames++
+                if (inWindow >= window) {
+                    peaks.write(minOf(255, windowMax * 255 / 32768))
+                    inWindow = 0
+                    windowMax = 0
+                }
+                resampler.feed(l, r) { ol, orr ->
+                    writer.write16(ol)
+                    writer.write16(orr)
+                }
+            }
+            if (!ok || rate <= 0) return null
+            writer.flush()
+        } catch (e: Exception) {
+            return null
+        } finally {
+            try {
+                stream.close()
+            } catch (e: Exception) {
+                // ignorieren
+            }
+        }
+        if (inWindow > 0) peaks.write(minOf(255, windowMax * 255 / 32768))
+        val duration = frames.toDouble() / rate
+        return if (duration > 0.0) Analysis(duration, peaks.toByteArray()) else null
     }
 
     private fun analyze(file: File): Analysis? {
