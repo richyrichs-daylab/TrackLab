@@ -26,17 +26,36 @@ object Sounds {
         )
     }
 
+    private fun hz(midi: Int): Double = 440.0 * 2.0.pow((midi - 69) / 12.0)
+
     private val synthSet: Array<ShortArray> by lazy {
-        Array(synthMidi.size) { i ->
-            DrumSound.synth(RATE, 440.0 * 2.0.pow((synthMidi[i] - 69) / 12.0))
-        }
+        Array(synthMidi.size) { i -> DrumSound.synth(RATE, hz(synthMidi[i])) }
     }
 
-    fun set(type: TrackType): Array<ShortArray> =
-        if (type == TrackType.SYNTH) synthSet else effectSet
+    private val pianoSet: Array<ShortArray> by lazy {
+        Array(synthMidi.size) { i -> DrumSound.piano(RATE, hz(synthMidi[i])) }
+    }
 
-    fun lane(type: TrackType, lane: Int): ShortArray {
-        val s = set(type)
+    /** Bass: eine Oktave tiefer als der Synth. */
+    private val bassSet: Array<ShortArray> by lazy {
+        Array(synthMidi.size) { i -> DrumSound.bass(RATE, hz(synthMidi[i] - 12)) }
+    }
+
+    val INSTRUMENTS = listOf("Synth", "Piano", "Bass")
+
+    fun set(type: TrackType, instrument: Int = 0): Array<ShortArray> =
+        if (type == TrackType.SYNTH) {
+            when (instrument) {
+                1 -> pianoSet
+                2 -> bassSet
+                else -> synthSet
+            }
+        } else {
+            effectSet
+        }
+
+    fun lane(type: TrackType, lane: Int, instrument: Int = 0): ShortArray {
+        val s = set(type, instrument)
         return s[lane.coerceIn(0, s.size - 1)]
     }
 
@@ -47,9 +66,9 @@ object Sounds {
         return names[midi % 12] + (midi / 12 - 1)
     }
 
-    fun laneNames(type: TrackType): List<String> =
+    fun laneNames(type: TrackType, instrument: Int = 0): List<String> =
         if (type == TrackType.SYNTH) {
-            synthMidi.map { noteName(it) }
+            synthMidi.map { noteName(if (instrument == 2) it - 12 else it) }
         } else {
             listOf(
                 "Trommel", "Hitsch", "Hitsch 2", "Knaller", "Händeklatschen",
