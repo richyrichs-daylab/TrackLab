@@ -807,7 +807,7 @@ fun ProjectScreen(
                         // Ein-/Ausblenden-Zeile (über den Block-Werkzeugen)
                         if (selectedBlock != null && fadeOpen && !timeline.stretchMode) {
                             val c = selectedBlock.second
-                            val blockLen = c.lengthBar
+                            val blockLen = c.endBar - c.startBar
                             val inF = (c.fadeIn / blockLen).toFloat().coerceIn(0f, 1f)
                             val outF = (c.fadeOut / blockLen).toFloat().coerceIn(0f, 1f - inF)
                             Box(Modifier.fillMaxWidth().background(colors.rowBg)) {
