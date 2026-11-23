@@ -608,6 +608,47 @@ fun Timeline(
                                 }
                             }
 
+                            // Ein-/Ausblenden: Blockfarbe an den Enden verwaschen (ganze Gruppe)
+                            if (c.fadeIn > 0.0 || c.fadeOut > 0.0) {
+                                val wash = colors.rowBg
+                                val gL = (c.startBar * barPx - scroll).toFloat()
+                                val gR = (c.endBar * barPx - scroll).toFloat()
+                                val inPx = (c.fadeIn * barPx).toFloat()
+                                val outPx = (c.fadeOut * barPx).toFloat()
+                                c.tiles().forEach { tile ->
+                                    val left = (tile.startBar * barPx - scroll).toFloat()
+                                    val width = (tile.lengthBar * barPx).toFloat()
+                                    if (left + width < 0f || left > w) return@forEach
+                                    val size = Size(maxOf(width - gap, 1f), clipH)
+                                    if (inPx > 0f && left < gL + inPx) {
+                                        drawRoundRect(
+                                            brush = Brush.horizontalGradient(
+                                                0f to wash.copy(alpha = 0.92f),
+                                                1f to wash.copy(alpha = 0f),
+                                                startX = gL,
+                                                endX = gL + inPx
+                                            ),
+                                            topLeft = Offset(left, top),
+                                            size = size,
+                                            cornerRadius = CornerRadius(12.dp.toPx())
+                                        )
+                                    }
+                                    if (outPx > 0f && left + width > gR - outPx) {
+                                        drawRoundRect(
+                                            brush = Brush.horizontalGradient(
+                                                0f to wash.copy(alpha = 0f),
+                                                1f to wash.copy(alpha = 0.92f),
+                                                startX = gR - outPx,
+                                                endX = gR
+                                            ),
+                                            topLeft = Offset(left, top),
+                                            size = size,
+                                            cornerRadius = CornerRadius(12.dp.toPx())
+                                        )
+                                    }
+                                }
+                            }
+
                             // Wiederholen-Kreis: nur am ausgewählten Block
                             if (!state.stretchMode && c.id == editor.selectedClipId &&
                                 t.id == editor.selectedTrackId
