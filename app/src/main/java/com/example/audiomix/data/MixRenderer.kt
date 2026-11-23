@@ -434,8 +434,8 @@ class MixRenderer(
         if (clip.fadeIn <= 0.0 && clip.fadeOut <= 0.0) return 1f
         val bar = frame / framesPerBar
         var f = 1.0
-        if (clip.fadeIn > 0.0) f = minOf(f, (bar - clip.startBar) / clip.fadeIn)
-        if (clip.fadeOut > 0.0) f = minOf(f, (clip.startBar + clip.lengthBar - bar) / clip.fadeOut)
+        if (clip.fadeIn > 0.0) f = minOf(f, (bar - clip.fadeFrom) / clip.fadeIn)
+        if (clip.fadeOut > 0.0) f = minOf(f, (clip.fadeTo - bar) / clip.fadeOut)
         return f.coerceIn(0.0, 1.0).toFloat()
     }
 
