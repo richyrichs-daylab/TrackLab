@@ -59,6 +59,12 @@ fun BlockToolsBar(
             GradientSymbol(check = true, onClick = onStretchConfirm)
         } else {
             Icon(
+                painter = painterResource(R.drawable.ic_copy),
+                contentDescription = "Kopieren",
+                tint = colors.onBackground,
+                modifier = Modifier.size(28.dp).clickable(onClick = onCopy)
+            )
+            Icon(
                 painter = painterResource(if (clipMuted) R.drawable.ic_speaker_muted else R.drawable.ic_speaker),
                 contentDescription = "Block stummschalten",
                 tint = if (clipMuted) Color(0xFFE8607A) else colors.onBackground,
@@ -69,12 +75,6 @@ fun BlockToolsBar(
                 contentDescription = "Teilen",
                 tint = colors.onBackground,
                 modifier = Modifier.size(28.dp).clickable(onClick = onSplit)
-            )
-            Icon(
-                painter = painterResource(R.drawable.ic_copy),
-                contentDescription = "Kopieren",
-                tint = colors.onBackground,
-                modifier = Modifier.size(28.dp).clickable(onClick = onCopy)
             )
             Text(
                 text = "Ausschneiden",
