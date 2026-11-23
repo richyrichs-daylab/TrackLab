@@ -171,43 +171,41 @@ class ProjectEditor(
 
     fun setThreeDAcid(value: Double) = mapSelected { t -> t.copy(threeDAcid = value.coerceIn(0.0, 1.0)) }
 
+    fun setAcidSync(on: Boolean) = mapSelected { t -> t.copy(acidSync = on) }
+
     /** Schaltet einen Effekt ("pitch", "delay", "reverb", "radio", "3d") an oder aus (Standard: an). */
     fun setFxEnabled(key: String, enabled: Boolean) = mapSelected { t ->
         t.copy(fxOff = if (enabled) t.fxOff - key else t.fxOff + key)
     }
 
-    /** Setzt einen Effekt auf die Standardeinstellungen zurück (und schaltet ihn an). */
+    /** Setzt einen Effekt auf die Standardeinstellungen zurück (ohne ihn ein- oder auszuschalten). */
     fun resetEffect(key: String) = mapSelected { t ->
         when (key) {
             "pitch" -> t.copy(
                 eqGain = listOf(0, 0, 0),
                 eqFadeIn = listOf(0.0, 0.0, 0.0),
-                eqFadeOut = listOf(0.0, 0.0, 0.0),
-                fxOff = t.fxOff - key
+                eqFadeOut = listOf(0.0, 0.0, 0.0)
             )
             "delay" -> t.copy(
                 delay = FxDefaults.DELAY,
                 delayFadeIn = listOf(0.0, 0.0, 0.0),
-                delayFadeOut = listOf(0.0, 0.0, 0.0),
-                fxOff = t.fxOff - key
+                delayFadeOut = listOf(0.0, 0.0, 0.0)
             )
             "reverb" -> t.copy(
                 reverbLevel = 0.0,
                 reverbFadeIn = 0.0,
                 reverbFadeOut = 0.0,
-                reverbPreset = FxDefaults.REVERB_PRESET,
-                fxOff = t.fxOff - key
+                reverbPreset = FxDefaults.REVERB_PRESET
             )
             "radio" -> t.copy(
                 radio = FxDefaults.RADIO,
                 radioFadeIn = listOf(0.0, 0.0),
-                radioFadeOut = listOf(0.0, 0.0),
-                fxOff = t.fxOff - key
+                radioFadeOut = listOf(0.0, 0.0)
             )
             "3d" -> t.copy(
                 threeDPos = 0,
                 threeDAcid = 0.0,
-                fxOff = t.fxOff - key
+                acidSync = true
             )
             else -> t
         }
@@ -557,7 +555,8 @@ class ProjectEditor(
                     radioFadeIn = current.radioFadeIn,
                     radioFadeOut = current.radioFadeOut,
                     threeDPos = current.threeDPos,
-                    threeDAcid = current.threeDAcid
+                    threeDAcid = current.threeDAcid,
+                    acidSync = current.acidSync
                 )
             } else {
                 s
