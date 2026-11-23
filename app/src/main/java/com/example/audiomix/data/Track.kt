@@ -57,9 +57,15 @@ data class Clip(
     val fadeIn: Double = 0.0,
     val fadeOut: Double = 0.0,
     /** Nur Synth-Blöcke: 0 = Synth, 1 = Piano, 2 = Bass. */
-    val instrument: Int = 0
+    val instrument: Int = 0,
+    /** Nur intern (nicht gespeichert): Anfang/Ende der ganzen Gruppe aus Block + Wiederholungen. */
+    val groupStart: Double = -1.0,
+    val groupEnd: Double = -1.0
 ) {
     val tileEnd: Double get() = startBar + lengthBar
+
+    val fadeFrom: Double get() = if (groupStart >= 0.0) groupStart else startBar
+    val fadeTo: Double get() = if (groupEnd >= 0.0) groupEnd else startBar + lengthBar
 
     val copiesLength: Double
         get() {
@@ -75,7 +81,9 @@ data class Clip(
     /** Der Block und seine Kopien als einzelne Teile (der erste ist das Original). */
     fun tiles(freshIds: Boolean = false): List<Clip> {
         val result = ArrayList<Clip>()
-        result.add(copy(repeatCount = 0, repeatPartial = 0.0))
+        val gs = startBar
+        val ge = endBar
+        result.add(copy(repeatCount = 0, repeatPartial = 0.0, groupStart = gs, groupEnd = ge))
         var s = startBar + lengthBar
         for (i in 1..repeatCount) {
             val len = if (i == repeatCount && repeatPartial > 0.0) min(repeatPartial, lengthBar) else lengthBar
@@ -85,7 +93,9 @@ data class Clip(
                     startBar = s,
                     lengthBar = len,
                     repeatCount = 0,
-                    repeatPartial = 0.0
+                    repeatPartial = 0.0,
+                    groupStart = gs,
+                    groupEnd = ge
                 )
             )
             s += len
