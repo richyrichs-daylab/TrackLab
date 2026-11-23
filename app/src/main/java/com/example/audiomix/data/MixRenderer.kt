@@ -291,6 +291,9 @@ private class SpatialFx {
     var mix = 0f
 }
 
+/** Taktgleiches Acid: ganze Wechsel (hin und zurück) pro Takt je Stufe 1 bis 7. */
+private val ACID_CYCLES_PER_BAR = doubleArrayOf(0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
+
 /** Positionen: 0 Mitte, 1 vorne, 2 rechts, 3 links, 4 hinten. */
 private val POS_GAIN_L = floatArrayOf(1f, 1.1f, 0.15f, 1f, 0.8f)
 private val POS_GAIN_R = floatArrayOf(1f, 1.1f, 1f, 0.15f, 0.8f)
@@ -531,9 +534,17 @@ class MixRenderer(
                 // Acid: wechselt zwischen der gewählten Seite (zuerst) und ihrer Gegenseite
                 var target = 0f
                 if (tr.threeDAcid > 0.0) {
-                    val hz = 0.25 + 11.75 * tr.threeDAcid * tr.threeDAcid
-                    val rel = maxOf(0L, frame - laneStartFrame)
-                    val phase = (rel.toDouble() / RATE * hz) % 1.0
+                    val phase: Double
+                    if (tr.acidSync) {
+                        // taktgleich: Wechsel passend zum Takt, immer ab der Takt-Linie
+                        val level = Math.round(tr.threeDAcid * 7).toInt().coerceIn(1, 7)
+                        val cyclesPerBar = ACID_CYCLES_PER_BAR[level - 1]
+                        phase = (frame / framesPerBar * cyclesPerBar) % 1.0
+                    } else {
+                        val hz = 0.25 + 11.75 * tr.threeDAcid * tr.threeDAcid
+                        val rel = maxOf(0L, frame - laneStartFrame)
+                        phase = (rel.toDouble() / RATE * hz) % 1.0
+                    }
                     target = if (phase < 0.5) 0f else 1f
                 }
                 val step = 1f / (0.006f * RATE)
