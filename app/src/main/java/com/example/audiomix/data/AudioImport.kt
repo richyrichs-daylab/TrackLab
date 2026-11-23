@@ -101,7 +101,7 @@ object AudioImport {
         if (pcm.exists() && pcm.length() > 0L) return pcm
         if (!source.exists()) return null
         val tmp = File(dir, pcm.name + ".tmp")
-        if (!convertToPcm(source, tmp)) {
+        if (analyzeAndConvert(source, tmp) == null) {
             tmp.delete()
             return null
         }
@@ -112,34 +112,67 @@ object AudioImport {
     /** Dekodiert die Datei einmal und liefert Wellenform und Rohdatei (44,1 kHz, Stereo, 16 Bit) zugleich. */
     private fun analyzeAndConvert(file: File, outFile: File): Analysis? {
         val peaks = ByteArrayOutputStream()
+        val stream = FileOutputStream(outFile)
+        val writer = PcmWriter(stream)
+        var rate = 0
         var window = 882
         var inWindow = 0
         var windowMax = 0
         var frames = 0L
-        var rate = 0
-        val stream = FileOutputStream(outFile)
+
+        // Umrechnung der Abtastrate (lineare Interpolation), ohne Umwege über Lambdas
+        var ratio = 1.0
+        var inIndex = 0L
+        var outCount = 0L
+        var prevL = 0
+        var prevR = 0
+
         try {
-            val writer = PcmWriter(stream)
-            val resampler = StreamResampler(TARGET_RATE, TARGET_RATE)
             val ok = decodeFrames(file, { r ->
                 rate = r
                 window = maxOf(1, r / PEAKS_PER_SECOND)
-                resampler.setInRate(r, TARGET_RATE)
-            }) { l, r ->
-                val m = maxOf(abs(l), abs(r))
-                if (m > windowMax) windowMax = m
-                inWindow++
-                frames++
-                if (inWindow >= window) {
-                    peaks.write(minOf(255, windowMax * 255 / 32768))
-                    inWindow = 0
-                    windowMax = 0
+                ratio = r.toDouble() / TARGET_RATE
+            }, BlockSink { buf, n ->
+                var i = 0
+                while (i < n) {
+                    val l = buf[i * 2].toInt()
+                    val r = buf[i * 2 + 1].toInt()
+
+                    val m = maxOf(abs(l), abs(r))
+                    if (m > windowMax) windowMax = m
+                    inWindow++
+                    if (inWindow >= window) {
+                        peaks.write(minOf(255, windowMax * 255 / 32768))
+                        inWindow = 0
+                        windowMax = 0
+                    }
+
+                    if (ratio == 1.0) {
+                        writer.write16(l)
+                        writer.write16(r)
+                    } else {
+                        if (inIndex == 0L) {
+                            prevL = l
+                            prevR = r
+                        }
+                        var outT = outCount * ratio
+                        while (outT <= inIndex) {
+                            val frac = outT - (inIndex - 1)
+                            val ol = Math.round(prevL + (l - prevL) * frac).toInt().coerceIn(-32768, 32767)
+                            val orr = Math.round(prevR + (r - prevR) * frac).toInt().coerceIn(-32768, 32767)
+                            writer.write16(ol)
+                            writer.write16(orr)
+                            outCount++
+                            outT = outCount * ratio
+                        }
+                        prevL = l
+                        prevR = r
+                        inIndex++
+                    }
+                    i++
                 }
-                resampler.feed(l, r) { ol, orr ->
-                    writer.write16(ol)
-                    writer.write16(orr)
-                }
-            }
+                frames += n
+            })
             if (!ok || rate <= 0) return null
             writer.flush()
         } catch (e: Exception) {
@@ -156,64 +189,15 @@ object AudioImport {
         return if (duration > 0.0) Analysis(duration, peaks.toByteArray()) else null
     }
 
-    private fun analyze(file: File): Analysis? {
-        val peaks = ByteArrayOutputStream()
-        var window = 882
-        var inWindow = 0
-        var windowMax = 0
-        var frames = 0L
-        var rate = 0
-        val ok = decodeFrames(file, { r ->
-            rate = r
-            window = maxOf(1, r / PEAKS_PER_SECOND)
-        }) { l, r ->
-            val m = maxOf(abs(l), abs(r))
-            if (m > windowMax) windowMax = m
-            inWindow++
-            frames++
-            if (inWindow >= window) {
-                peaks.write(minOf(255, windowMax * 255 / 32768))
-                inWindow = 0
-                windowMax = 0
-            }
-        }
-        if (!ok || rate <= 0) return null
-        if (inWindow > 0) peaks.write(minOf(255, windowMax * 255 / 32768))
-        val duration = frames.toDouble() / rate
-        return if (duration > 0.0) Analysis(duration, peaks.toByteArray()) else null
-    }
-
-    private fun convertToPcm(source: File, outFile: File): Boolean {
-        var fileStream: FileOutputStream? = null
-        try {
-            val stream = FileOutputStream(outFile)
-            fileStream = stream
-            val writer = PcmWriter(stream)
-            val resampler = StreamResampler(TARGET_RATE, TARGET_RATE)
-            val ok = decodeFrames(source, { r -> resampler.setInRate(r, TARGET_RATE) }) { l, r ->
-                resampler.feed(l, r) { ol, orr ->
-                    writer.write16(ol)
-                    writer.write16(orr)
-                }
-            }
-            if (!ok) return false
-            writer.flush()
-            return true
-        } catch (e: Exception) {
-            return false
-        } finally {
-            try {
-                fileStream?.close()
-            } catch (e: Exception) {
-                // ignorieren
-            }
-        }
-    }
-
     // ---------- Dekodieren ----------
 
-    private fun decodeFrames(file: File, onRate: (Int) -> Unit, onFrame: (Int, Int) -> Unit): Boolean =
-        if (isWav(file)) decodeWav(file, onRate, onFrame) else decodeWithCodec(file, onRate, onFrame)
+    /** Nimmt Blöcke von Stereo-Frames (links, rechts abwechselnd) entgegen. Ohne Boxing, daher schnell. */
+    private fun interface BlockSink {
+        fun onBlock(stereo: ShortArray, frames: Int)
+    }
+
+    private fun decodeFrames(file: File, onRate: (Int) -> Unit, sink: BlockSink): Boolean =
+        if (isWav(file)) decodeWav(file, onRate, sink) else decodeWithCodec(file, onRate, sink)
 
     private fun isWav(file: File): Boolean = try {
         file.inputStream().use { s ->
@@ -224,14 +208,14 @@ object AudioImport {
         false
     }
 
-    private fun decodeWav(file: File, onRate: (Int) -> Unit, onFrame: (Int, Int) -> Unit): Boolean =
+    private fun decodeWav(file: File, onRate: (Int) -> Unit, sink: BlockSink): Boolean =
         try {
-            RandomAccessFile(file, "r").use { raf -> decodeWavFrom(raf, onRate, onFrame) }
+            RandomAccessFile(file, "r").use { raf -> decodeWavFrom(raf, onRate, sink) }
         } catch (e: Exception) {
             false
         }
 
-    private fun decodeWavFrom(raf: RandomAccessFile, onRate: (Int) -> Unit, onFrame: (Int, Int) -> Unit): Boolean {
+    private fun decodeWavFrom(raf: RandomAccessFile, onRate: (Int) -> Unit, sink: BlockSink): Boolean {
         raf.seek(12)
         var format = 0
         var channels = 0
@@ -273,19 +257,24 @@ object AudioImport {
 
         onRate(rate)
         raf.seek(dataStart)
-        val buf = ByteArray(frameBytes * 4096)
+        val framesPerBlock = 16384
+        val buf = ByteArray(frameBytes * framesPerBlock)
+        val out = ShortArray(framesPerBlock * 2)
         var remaining = dataLen / frameBytes * frameBytes
         while (remaining > 0) {
             val want = minOf(remaining, buf.size.toLong()).toInt()
             raf.readFully(buf, 0, want)
             val bb = ByteBuffer.wrap(buf, 0, want).order(ByteOrder.LITTLE_ENDIAN)
             var i = 0
+            var o = 0
             while (i < want) {
                 val l = readSample(bb, i, bytes, format == 3)
                 val r = if (channels >= 2) readSample(bb, i + bytes, bytes, format == 3) else l
-                onFrame(l, r)
+                out[o++] = l.toShort()
+                out[o++] = r.toShort()
                 i += frameBytes
             }
+            sink.onBlock(out, o / 2)
             remaining -= want
         }
         return true
@@ -299,7 +288,7 @@ object AudioImport {
         else -> bb.getInt(pos) shr 16
     }
 
-    private fun decodeWithCodec(file: File, onRate: (Int) -> Unit, onFrame: (Int, Int) -> Unit): Boolean {
+    private fun decodeWithCodec(file: File, onRate: (Int) -> Unit, sink: BlockSink): Boolean {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         try {
@@ -332,47 +321,63 @@ object AudioImport {
             val info = MediaCodec.BufferInfo()
             var inputDone = false
             var outputDone = false
+            var raw = ShortArray(65536)
+            var stereo = ShortArray(65536)
             while (!outputDone) {
-                if (!inputDone) {
-                    val inIndex = decoder.dequeueInputBuffer(10_000)
-                    if (inIndex >= 0) {
-                        val inBuf = decoder.getInputBuffer(inIndex)
-                        if (inBuf != null) {
-                            val size = extractor.readSampleData(inBuf, 0)
-                            if (size < 0) {
-                                decoder.queueInputBuffer(
-                                    inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                                )
-                                inputDone = true
-                            } else {
-                                decoder.queueInputBuffer(inIndex, 0, size, extractor.sampleTime, 0)
-                                extractor.advance()
-                            }
-                        }
+                // Alle freien Eingabepuffer sofort füllen (ohne zu warten)
+                while (!inputDone) {
+                    val inIndex = decoder.dequeueInputBuffer(0)
+                    if (inIndex < 0) break
+                    val inBuf = decoder.getInputBuffer(inIndex)
+                    val size = if (inBuf != null) extractor.readSampleData(inBuf, 0) else -1
+                    if (size < 0) {
+                        decoder.queueInputBuffer(inIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        inputDone = true
+                    } else {
+                        decoder.queueInputBuffer(inIndex, 0, size, extractor.sampleTime, 0)
+                        extractor.advance()
                     }
                 }
-                val outIndex = decoder.dequeueOutputBuffer(info, 10_000)
-                if (outIndex >= 0) {
-                    val outBuf = decoder.getOutputBuffer(outIndex)
-                    if (outBuf != null && info.size > 0) {
-                        outBuf.position(info.offset)
-                        outBuf.limit(info.offset + info.size)
-                        val shorts = outBuf.order(ByteOrder.nativeOrder()).asShortBuffer()
-                        val count = shorts.remaining()
-                        var i = 0
-                        while (i + channels <= count) {
-                            val l = shorts.get(i).toInt()
-                            val r = if (channels >= 2) shorts.get(i + 1).toInt() else l
-                            onFrame(l, r)
-                            i += channels
+
+                // Alle fertigen Ausgabepuffer abholen; nur beim ersten kurz warten
+                var wait = 5_000L
+                while (true) {
+                    val outIndex = decoder.dequeueOutputBuffer(info, wait)
+                    wait = 0L
+                    if (outIndex >= 0) {
+                        val outBuf = decoder.getOutputBuffer(outIndex)
+                        if (outBuf != null && info.size > 0) {
+                            outBuf.position(info.offset)
+                            outBuf.limit(info.offset + info.size)
+                            val shorts = outBuf.order(ByteOrder.nativeOrder()).asShortBuffer()
+                            val count = shorts.remaining()
+                            if (raw.size < count) raw = ShortArray(count)
+                            shorts.get(raw, 0, count)
+                            val frames = count / channels
+                            if (channels == 2) {
+                                sink.onBlock(raw, frames)
+                            } else {
+                                if (stereo.size < frames * 2) stereo = ShortArray(frames * 2)
+                                for (f in 0 until frames) {
+                                    val l = raw[f * channels]
+                                    stereo[f * 2] = l
+                                    stereo[f * 2 + 1] = if (channels >= 2) raw[f * channels + 1] else l
+                                }
+                                sink.onBlock(stereo, frames)
+                            }
                         }
+                        decoder.releaseOutputBuffer(outIndex, false)
+                        if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                            outputDone = true
+                            break
+                        }
+                    } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        val newFormat = decoder.outputFormat
+                        channels = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                        onRate(newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE))
+                    } else if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                        break
                     }
-                    decoder.releaseOutputBuffer(outIndex, false)
-                    if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outputDone = true
-                } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    val newFormat = decoder.outputFormat
-                    channels = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-                    onRate(newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE))
                 }
             }
             return true
