@@ -63,6 +63,45 @@ object DrumSound {
         }
         return out
     }
+
+    /** Ein Klavier-Ton: harter Anschlag, mehrere Obertöne, die unterschiedlich schnell verklingen. */
+    fun piano(rate: Int, freq: Double): ShortArray {
+        val length = (0.9 * rate).toInt()
+        val out = ShortArray(length)
+        val amps = doubleArrayOf(1.0, 0.55, 0.32, 0.2, 0.12, 0.07)
+        val decay = doubleArrayOf(3.2, 4.2, 5.5, 7.0, 9.0, 11.0)
+        for (i in 0 until length) {
+            val t = i.toDouble() / rate
+            val attack = if (t < 0.003) t / 0.003 else 1.0
+            var wave = 0.0
+            for (h in amps.indices) {
+                val f = freq * (h + 1) * (1.0 + 0.0004 * h * h)
+                if (f < rate / 2.0) wave += amps[h] * sin(2.0 * PI * f * t) * exp(-t * decay[h])
+            }
+            val v = wave * attack * 0.3
+            out[i] = (v * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
+        }
+        return out
+    }
+
+    /** Ein Bass-Ton: kräftiger Grundton, weiche Sägezahn-Anteile, kurzer Knack. */
+    fun bass(rate: Int, freq: Double): ShortArray {
+        val length = (0.6 * rate).toInt()
+        val out = ShortArray(length)
+        var phase = 0.0
+        var low = 0.0
+        for (i in 0 until length) {
+            val t = i.toDouble() / rate
+            phase += 2.0 * PI * freq / rate
+            val attack = if (t < 0.004) t / 0.004 else 1.0
+            val env = attack * exp(-t * 4.5)
+            val saw = (sin(phase) + 0.5 * sin(2.0 * phase) + 0.33 * sin(3.0 * phase) + 0.25 * sin(4.0 * phase))
+            low += 0.18 * (saw - low)
+            val v = (sin(phase) * 0.8 + low * 0.5) * env * 0.6
+            out[i] = (v * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
+        }
+        return out
+    }
 }
 
 /** Ein Equalizer-Band (Biquad-Filter) mit eigenem Zustand je Kanal. */
@@ -369,7 +408,7 @@ class MixRenderer(
                 when (lane.track.type) {
                     TrackType.AUDIO -> mixAudio(lane.track, clip, gain, startFrame, endFrame, target)
                     TrackType.EFFECT, TrackType.SYNTH ->
-                        mixPattern(clip, Sounds.set(lane.track.type), gain, startFrame, endFrame, target)
+                        mixPattern(clip, Sounds.set(lane.track.type, clip.instrument), gain, startFrame, endFrame, target)
                 }
             }
             if (lane.hasFx) applyFx(lane, startFrame, count, target, acc)
@@ -572,6 +611,11 @@ class MixRenderer(
         endFrame: Long,
         acc: IntArray
     ) {
+        // Schnell raus, wenn der Block (samt Ausklingen der Töne) gerade nicht dran ist
+        val clipFrom = (clip.startBar * framesPerBar).toLong()
+        val clipTo = ((clip.startBar + clip.lengthBar) * framesPerBar).toLong() + RATE
+        if (endFrame <= clipFrom || startFrame >= clipTo) return
+        val hasFade = clip.fadeIn > 0.0 || clip.fadeOut > 0.0
         val cellBars = 1.0 / (16.0 * clip.stretch)
         val blockEnd = clip.startBar + clip.lengthBar
         val g = gain / 100f
@@ -589,10 +633,18 @@ class MixRenderer(
             val base = (from - startFrame).toInt() * 2
             val sourceStart = (from - hitStart).toInt()
             val n = (to - from).toInt()
-            for (i in 0 until n) {
-                val v = (sound[sourceStart + i] * (g * fade(clip, from + i))).toInt()
-                acc[base + i * 2] += v
-                acc[base + i * 2 + 1] += v
+            if (hasFade) {
+                for (i in 0 until n) {
+                    val v = (sound[sourceStart + i] * (g * fade(clip, from + i))).toInt()
+                    acc[base + i * 2] += v
+                    acc[base + i * 2 + 1] += v
+                }
+            } else {
+                for (i in 0 until n) {
+                    val v = (sound[sourceStart + i] * g).toInt()
+                    acc[base + i * 2] += v
+                    acc[base + i * 2 + 1] += v
+                }
             }
         }
     }
