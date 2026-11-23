@@ -56,9 +56,9 @@ private val PRESETS = listOf("small plate", "medium plate", "big plate", "cave",
 
 private val PINK = Color(0xFFFF2D85)
 
-private fun dbFromX(x: Float, width: Float, margin: Float): Int {
+private fun dbFromX(x: Float, width: Float, margin: Float, range: Int): Int {
     val f = ((x - margin) / (width - 2f * margin)).coerceIn(0f, 1f)
-    return Math.round(f * 24f) - 12
+    return Math.round(f * 2f * range) - range
 }
 
 private fun valueFromX(x: Float, width: Float, margin: Float): Float {
@@ -66,9 +66,9 @@ private fun valueFromX(x: Float, width: Float, margin: Float): Float {
     return Math.round(f * 20f) / 20f
 }
 
-/** Regler von -12 bis +12 dB, Mitte = unverändert. */
+/** Regler von -range bis +range dB, Mitte = unverändert (Treble/Bass ±24, Mid ±12). */
 @Composable
-private fun GainSlider(db: Int, enabled: Boolean, onChange: (Int) -> Unit, modifier: Modifier = Modifier) {
+private fun GainSlider(db: Int, range: Int, enabled: Boolean, onChange: (Int) -> Unit, modifier: Modifier = Modifier) {
     val colors = LocalAppColors.current
     val latest = rememberUpdatedState(onChange)
     val active = rememberUpdatedState(enabled)
@@ -80,7 +80,7 @@ private fun GainSlider(db: Int, enabled: Boolean, onChange: (Int) -> Unit, modif
             .pointerInput(Unit) {
                 val m = 22.dp.toPx()
                 detectTapGestures { off ->
-                    if (active.value) latest.value(dbFromX(off.x, size.width.toFloat(), m))
+                    if (active.value) latest.value(dbFromX(off.x, size.width.toFloat(), m, range))
                 }
             }
             .pointerInput(Unit) {
@@ -88,7 +88,7 @@ private fun GainSlider(db: Int, enabled: Boolean, onChange: (Int) -> Unit, modif
                 detectDragGestures { change, _ ->
                     if (active.value) {
                         change.consume()
-                        latest.value(dbFromX(change.position.x, size.width.toFloat(), m))
+                        latest.value(dbFromX(change.position.x, size.width.toFloat(), m, range))
                     }
                 }
             }
@@ -98,7 +98,7 @@ private fun GainSlider(db: Int, enabled: Boolean, onChange: (Int) -> Unit, modif
         val right = size.width - m
         val cy = size.height / 2f
         drawLine(colors.onBackground, Offset(left, cy), Offset(right, cy), 3.dp.toPx(), StrokeCap.Round)
-        val x = left + (right - left) * (db + 12) / 24f
+        val x = left + (right - left) * (db + range) / (2f * range)
         drawCircle(
             if (enabled) PINK else Color(0xFFE2E2E2),
             15.dp.toPx(),
@@ -443,6 +443,7 @@ fun EffectsPanel(
                             } else {
                                 GainSlider(
                                     db = track.eqGain[band],
+                                    range = if (band == 1) 12 else 24,
                                     enabled = !greyed,
                                     onChange = { editor.setEqGain(band, it) }
                                 )
